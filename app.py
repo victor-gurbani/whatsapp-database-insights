@@ -141,6 +141,9 @@ if 'data' in st.session_state:
     # Exclude Groups Filter
     exclude_groups = st.sidebar.checkbox("Exclude Groups", value=False, key="cfg_ex_groups")
     
+    # Exclude Me Filter
+    exclude_me = st.sidebar.checkbox("Exclude 'Me/You' from Charts", value=True, key="cfg_ex_me", help="Remove your own sent messages from Activity and Top Talkers charts.")
+    
     # Family Filter
     st.sidebar.subheader("Contact Management")
     all_contacts = sorted(df_raw['contact_name'].unique().astype(str))
@@ -285,7 +288,7 @@ if 'data' in st.session_state:
             if split_opt == "Gender": split_arg = 'gender'
             elif split_opt.startswith("Type"): split_arg = 'group'
             
-            hourly = analyzer.get_hourly_activity(split_by=split_arg)
+            hourly = analyzer.get_hourly_activity(split_by=split_arg, exclude_me=exclude_me)
             
             if split_arg:
                 fig_line = px.line(hourly, x=hourly.index, y=hourly.columns, markers=True, 
@@ -310,7 +313,7 @@ if 'data' in st.session_state:
             if split_opt_m == "Gender": split_arg_m = 'gender'
             elif split_opt_m.startswith("Type"): split_arg_m = 'group'
             
-            monthly = analyzer.get_monthly_activity(split_by=split_arg_m)
+            monthly = analyzer.get_monthly_activity(split_by=split_arg_m, exclude_me=exclude_me)
             
             if split_arg_m:
                 color_map = {'male': '#636EFA', 'female': '#EF553B', 'unknown': 'gray'} if split_arg_m == 'gender' else None
@@ -646,17 +649,23 @@ if 'data' in st.session_state:
         top_n_filter = col_fun_ctrl1.selectbox("Filter Rank to Top Contacts:", [50, 100, 200, "All"], index=1, help="Analyze only the most active contacts to reduce noise.")
         top_n_val = None if top_n_filter == "All" else int(top_n_filter)
         
+        
         # Calculate Stats
-        beh_scorecard = analyzer.get_behavioral_scorecard() # Behavioral logic is global
-        fun_stats = analyzer.get_fun_stats(top_n=top_n_val)
-        streaks = analyzer.get_streak_stats()
-        killers = analyzer.get_conversation_killers()
+        # Pass exclude_groups from sidebar
+        ex_groups = exclude_groups if 'exclude_groups' in locals() else False
+        
+        beh_scorecard = analyzer.get_behavioral_scorecard(exclude_groups=ex_groups) 
+        fun_stats = analyzer.get_fun_stats(top_n=top_n_val, exclude_groups=ex_groups)
+        streaks = analyzer.get_streak_stats(exclude_groups=ex_groups)
+        killers = analyzer.get_conversation_killers(exclude_groups=ex_groups)
         
         # New Stats
-        reaction_stats = analyzer.get_reaction_stats()
-        emoji_stats = analyzer.get_emoji_stats(top_n=top_n_val)
-        mention_stats = analyzer.get_mention_stats(top_n=top_n_val)
-        history_stats = analyzer.get_historical_stats()
+        # Make sure these methods accept the param or logic inside uses data
+        # I need to update analyzer for these too.
+        reaction_stats = analyzer.get_reaction_stats() # TODO: Add exclude_groups
+        emoji_stats = analyzer.get_emoji_stats(top_n=top_n_val, exclude_groups=ex_groups)
+        mention_stats = analyzer.get_mention_stats(top_n=top_n_val, exclude_groups=ex_groups)
+        history_stats = analyzer.get_historical_stats(exclude_groups=ex_groups)
         
         # Pre-calc combined media for Gallery Curator
         if 'image_media' in fun_stats.columns and 'video_media' in fun_stats.columns:

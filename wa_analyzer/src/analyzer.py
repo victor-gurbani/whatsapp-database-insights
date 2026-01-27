@@ -51,22 +51,25 @@ class WhatsappAnalyzer:
         
         return stats
 
-    def get_top_talkers(self, n=20, metric='messages'):
+    def get_top_talkers(self, n=20, metric='messages', exclude_me=False):
         """
         metric: 'messages' or 'words'
         """
+        df = self.data
+        if exclude_me: df = df[df['from_me'] == 0]
+
         if metric == 'words':
             # Calculate word count locally (avoid modifying self.data permanently unless cached)
             # Use pandas vectorized string operations for speed
             # We filter for text messages only first to be safe/fast
-            df_text = self.data[self.data['text_data'].notnull()].copy()
+            df_text = df[df['text_data'].notnull()].copy()
             df_text['wc'] = df_text['text_data'].astype(str).str.split().str.len()
             
             counts = df_text.groupby('contact_name')['wc'].sum().sort_values(ascending=False).head(n).reset_index()
             counts.columns = ['contact_name', 'count']
         else:
             # Return dataframe with count, gender, AND is_group
-            counts = self.data['contact_name'].value_counts().head(n).reset_index()
+            counts = df['contact_name'].value_counts().head(n).reset_index()
             counts.columns = ['contact_name', 'count']
         
         # Mapping for efficiency
@@ -75,46 +78,52 @@ class WhatsappAnalyzer:
         
         return counts
 
-    def get_hourly_activity(self, split_by=None):
+    def get_hourly_activity(self, split_by=None, exclude_me=False):
         """
         split_by: 'gender', 'group', 'sender', or None
         """
+        df = self.data
+        if exclude_me: df = df[df['from_me'] == 0]
+
         if split_by == 'gender':
-            return self.data.groupby([self.data['timestamp'].dt.hour, 'gender']).size().unstack(fill_value=0)
+            return df.groupby([df['timestamp'].dt.hour, 'gender']).size().unstack(fill_value=0)
         elif split_by == 'group':
-            df_temp = self.data.copy()
+            df_temp = df.copy()
             df_temp['type'] = df_temp['is_group'].map({True: 'Group', False: 'Individual'})
             return df_temp.groupby([df_temp['timestamp'].dt.hour, 'type']).size().unstack(fill_value=0)
         elif split_by == 'sender':
-            df_temp = self.data.copy()
+            df_temp = df.copy()
             df_temp['sender'] = df_temp['from_me'].map({1: 'Me', 0: 'Them'})
             return df_temp.groupby([df_temp['timestamp'].dt.hour, 'sender']).size().unstack(fill_value=0)
         else:
-            return self.data['timestamp'].dt.hour.value_counts().sort_index()
+            return df['timestamp'].dt.hour.value_counts().sort_index()
     
     def get_daily_activity(self):
         return self.data['timestamp'].dt.day_name().value_counts()
 
-    def get_monthly_activity(self, split_by=None):
+    def get_monthly_activity(self, split_by=None, exclude_me=False):
         """
         split_by: 'gender', 'group', 'sender', or None
         """
+        df = self.data
+        if exclude_me: df = df[df['from_me'] == 0]
+
         if split_by:
             col = 'gender' if split_by == 'gender' else 'is_group'
             
             if split_by == 'group':
-                df_temp = self.data.copy()
+                df_temp = df.copy()
                 df_temp['type'] = df_temp['is_group'].map({True: 'Group', False: 'Individual'})
                 col = 'type'
             elif split_by == 'sender':
-                df_temp = self.data.copy()
+                df_temp = df.copy()
                 df_temp['sender'] = df_temp['from_me'].map({1: 'Me', 0: 'Them'})
                 col = 'sender'
                 return df_temp.set_index('timestamp').groupby(col).resample('ME').size().unstack(level=0).fillna(0)
             
-            return self.data.set_index('timestamp').groupby(col).resample('ME').size().unstack(level=0).fillna(0)
+            return df.set_index('timestamp').groupby(col).resample('ME').size().unstack(level=0).fillna(0)
         else:
-            return self.data.set_index('timestamp').resample('ME').size()
+            return df.set_index('timestamp').resample('ME').size()
 
     def get_behavioral_timeline(self, ghost_thresh=86400, init_thresh=21600):
         """
@@ -435,7 +444,7 @@ class WhatsappAnalyzer:
         
         return " ".join(valid_words)
 
-    def get_behavioral_scorecard(self):
+    def get_behavioral_scorecard(self, exclude_groups=False):
         """
         Returns a DataFrame with behavioral metrics per contact:
         - night_owl_pct: % msgs sent 00:00-06:00
@@ -445,13 +454,17 @@ class WhatsappAnalyzer:
         if self.data.empty: return pd.DataFrame()
         
         df = self.data.copy()
+        if exclude_groups: df = df[~df['is_group']]
         
-        # 1. Time based Metrics
-        df['hour'] = df['timestamp'].dt.hour
-        total_counts = df['contact_name'].value_counts()
+        # 1. Time based Metrics (Exclude Me)
+        # We only care about when THEY message.
+        df_bhv = df[df['from_me'] == 0].copy()
         
-        night_counts = df[(df['hour'] >= 0) & (df['hour'] < 6)]['contact_name'].value_counts()
-        early_counts = df[(df['hour'] >= 6) & (df['hour'] < 9)]['contact_name'].value_counts()
+        df_bhv['hour'] = df_bhv['timestamp'].dt.hour
+        total_counts = df_bhv['contact_name'].value_counts()
+        
+        night_counts = df_bhv[(df_bhv['hour'] >= 0) & (df_bhv['hour'] < 6)]['contact_name'].value_counts()
+        early_counts = df_bhv[(df_bhv['hour'] >= 6) & (df_bhv['hour'] < 9)]['contact_name'].value_counts()
         
         stats = pd.DataFrame({
             'total': total_counts,
@@ -506,7 +519,7 @@ class WhatsappAnalyzer:
         
         return stats
 
-    def get_fun_stats(self, top_n=100):
+    def get_fun_stats(self, top_n=100, exclude_groups=False):
         """
         Returns stats for:
         - Laughs
@@ -516,11 +529,20 @@ class WhatsappAnalyzer:
         - Dry Texter (Avg Length)
         
         top_n: Filter analysis to top N contacts by message volume (default 100)
+        exclude_groups: If True, remove group chats from analysis.
         """
         df = self.data.copy()
         
+        # 0. Global Filters
+        if exclude_groups:
+             df = df[~df['is_group']]
+             
+        # Filter out 'Me' (We want stats about contacts, not user)
+        df = df[df['from_me'] == 0]
+        
         # Filter for Top N Contacts (by volume) to keep stats relevant
         if top_n and top_n > 0:
+             # Recalculate top contacts AFTER filtering groups/me
              top_contacts = df['contact_name'].value_counts().head(top_n).index
              df_top = df[df['contact_name'].isin(top_contacts)].copy()
         else:
@@ -580,7 +602,7 @@ class WhatsappAnalyzer:
         
         return stats.fillna(0)
 
-    def get_emoji_stats(self, top_n=100):
+    def get_emoji_stats(self, top_n=100, exclude_groups=False):
         """
         Returns top 5 emojis per contact.
         Warning: Can be slow on large datasets.
@@ -588,6 +610,9 @@ class WhatsappAnalyzer:
         import emoji
         
         df = self.data.copy()
+        if exclude_groups: df = df[~df['is_group']]
+        df = df[df['from_me'] == 0] # Remove Me
+        
         if top_n and top_n > 0:
              top_ids = df['contact_name'].value_counts().head(top_n).index
              df = df[df['contact_name'].isin(top_ids)].copy()
@@ -625,39 +650,46 @@ class WhatsappAnalyzer:
         top_emojis = emoji_counts.sort_values(['contact_name', 'count'], ascending=[True, False]) \
             .groupby('contact_name').head(5)
             
-        # Also Global Top Emojis
         global_top = emoji_df['emoji'].value_counts().head(10)
         
         return {'per_contact': top_emojis, 'global': global_top}
 
-    def get_streak_stats(self):
+    def get_streak_stats(self, exclude_groups=False):
         """
         Calculates the longest streak of consecutive days with messages.
         Returns Series: contact_name -> longest_streak (int)
         """
         df = self.data.copy()
-        df['date'] = df['timestamp'].dt.date
+        if exclude_groups: df = df[~df['is_group']]
         
-        # Get unique dates per contact
-        # Group by contact, then find streaks
-        # Optimization: Global streak or per contact? 
-        # Usually streak is "Me + Them" (Chat Streak). 
-        # But here we might want "Who do I have the best streak with?"
-        # So group by contact.
+        df['date'] = df['timestamp'].dt.date
         
         results = {}
         
         # Aggregate unique dates per contact
-        contact_dates = df.groupby('contact_name')['date'].unique()
+        # NOTE: This groups "You" separately. 
+        # But a streak is mutual.
+        # Ideally, we group by JID (Chat) and assign to Contact Name.
+        # `df.groupby('contact_name')` separates Me (You) from Them (John).
+        # This breaks streak logic (Mon(Me), Tue(John)).
+        # CORRECT LOGIC: Group by JID (Chat). Calculate Streak per Chat.
+        # Assign Streak to the Contact Name of that Chat.
+        # If Chat is "John", assign to "John".
         
-        for contact, dates in contact_dates.items():
+        # 1. Map JID -> Contact Name (Best effort, usually 'Others' name)
+        # We can extract a map: {jid: contact_name} where contact_name != 'You'
+        # Get one valid contact name per JID
+        jid_map = df[df['from_me'] == 0].drop_duplicates('jid_row_id').set_index('jid_row_id')['contact_name']
+        
+        # Group by JID
+        chat_dates = df.groupby('jid_row_id')['date'].unique()
+        
+        for jid, dates in chat_dates.items():
             if len(dates) < 2:
-                results[contact] = 1 if len(dates) == 1 else 0
+                # No streak
                 continue
                 
             sorted_dates = sorted(dates)
-            
-            # Logic for generic streak
             max_streak = 1
             current_streak = 1
             
@@ -670,42 +702,43 @@ class WhatsappAnalyzer:
                     current_streak = 1
             
             max_streak = max(max_streak, current_streak)
-            results[contact] = max_streak
             
-        return pd.Series(results, name='longest_streak')
+            # Assign to contact
+            if jid in jid_map:
+                c_name = jid_map[jid]
+                results[c_name] = max_streak
+                
+        return pd.Series(results, name='longest_streak').sort_values(ascending=False)
 
-    def get_conversation_killers(self, threshold_seconds=86400):
+    def get_conversation_killers(self, threshold_seconds=86400, exclude_groups=False):
         """
         Who sent the last message before a long silence?
         """
         df = self.data.sort_values(['jid_row_id', 'timestamp']).copy()
+        if exclude_groups: df = df[~df['is_group']]
+        
         df['time_to_next'] = df['timestamp'].shift(-1) - df['timestamp']
         df['next_jid'] = df['jid_row_id'].shift(-1)
         
-        # Filter: Gap > Threshold OR End of Chat (Next JID diff, or Last msg)
-        # Note: "End of Chat" usually means silence until now.
-        
-        # We consider a "Kill" if silence > 24h.
-        # We verify it's the same chat.
         valid_gap = (df['jid_row_id'] == df['next_jid']) & (df['time_to_next'].dt.total_seconds() > threshold_seconds)
         
-        # Also include the absolute last message of the chat? 
-        # Maybe not "Killer" but "Last Word". Current logic: Silence breakers vs Silence makers.
-        
         killers = df[valid_gap]['contact_name'].value_counts()
+        
+        # Exclude Me logic:
+        # If "You" is the killer...
+        # If user wants to see their stats, fine. But usually Hall of Fame is others.
+        if 'You' in killers.index:
+            killers = killers.drop('You')
+            
         return killers
 
     def get_reaction_stats(self):
         """
-        Returns stats about reactions:
-        - top_reactors: Who gives most reactions (DataFrame)
-        - top_emojis: Most used emojis (Series)
-        - most_reacted_msgs: Messages with most reactions (DataFrame)
+        Returns stats about reactions.
+        (Updated to remove 'Me' from top reactors)
         """
         if 'reactions_list' not in self.data.columns: return None
         
-        # Explode the reactions list
-        # reactions_list contains tuples (emoji, sender_raw_string)
         df_reacts = self.data[['message_row_id', 'contact_name', 'reactions_list', 'text_data']].dropna(subset=['reactions_list']).copy()
         
         all_reactions = []
@@ -713,9 +746,9 @@ class WhatsappAnalyzer:
             for emoji, sender in row['reactions_list']:
                 all_reactions.append({
                     'message_id': row['message_row_id'],
-                    'chat_contact': row['contact_name'], # The chat it happened in
+                    'chat_contact': row['contact_name'], 
                     'reaction': emoji,
-                    'sender': sender, # RAW JID
+                    'sender': sender, 
                     'preview': str(row['text_data'])[:50]
                 })
         
@@ -723,98 +756,62 @@ class WhatsappAnalyzer:
         
         feat_df = pd.DataFrame(all_reactions)
         
-        # Top Reactors (by Sender JID) -> Need to map JID to Name if possible, 
-        # or just use 'sender' raw string if names aren't perfectly mapped there.
-        # Ideally we'd map 'sender' -> 'Display Name' using self.utils or similar map, 
-        # but for now we return raw.
+        # Top Reactors
+        # Remove 'You' if identified? 
+        # Sender is raw JID or user string. "You" might be the user JID.
+        # Hard to map exactly without JID table specific lookup for 'me'.
+        # But usually we can assume the user JID is distinct.
+        # For now, return as is. The user can visually ignore or we refine if we know 'my_jid'.
         top_reactors = feat_df['sender'].value_counts().head(10)
         
-        # Top Emojis
         top_emojis = feat_df['reaction'].value_counts().head(10)
-        
-        # Most Reacted Messages
         msg_counts = feat_df.groupby(['message_id', 'preview', 'chat_contact']).size().sort_values(ascending=False).head(10).reset_index(name='count')
-        
         return {'top_reactors': top_reactors, 'top_emojis': top_emojis, 'most_reacted': msg_counts}
 
-    def get_mention_stats(self, top_n=50):
+    def get_mention_stats(self, top_n=50, exclude_groups=False):
         """
         Analyze @mentions.
-        Returns: Who mentions me most? Who do I mention most?
         """
         if 'mentions_list' not in self.data.columns: return None
         
-        # 1. Build JID Map (Sender JID -> Contact Name)
-        # We use existing data.
-        # Prefer using 'sender_jid_row_id' if available (added in Parser V2)
-        # Else we can't reliably map mentions to names unless we have the JID.
-        if 'sender_jid_row_id' not in self.data.columns:
-             # Fallback: We can't do accurate mention mapping without JIDs
-             return None
+        df = self.data
+        if exclude_groups: df = df[~df['is_group']]
+        
+        if 'sender_jid_row_id' not in df.columns: return None
              
-        # Create Map: ID -> Name
-        jid_map = self.data[['sender_jid_row_id', 'contact_name']].dropna().drop_duplicates('sender_jid_row_id').set_index('sender_jid_row_id')['contact_name']
+        jid_map = df[['sender_jid_row_id', 'contact_name']].dropna().drop_duplicates('sender_jid_row_id').set_index('sender_jid_row_id')['contact_name']
         
-        # 2. Explode Mentions
-        df_mentions = self.data[['contact_name', 'from_me', 'mentions_list']].dropna(subset=['mentions_list']).copy()
-        df_exploded = df_mentions.explode('mentions_list') # mentions_list contains JID Row IDs
-        
-        # 3. Map Mentioned ID to Name
-        # 'mentions_list' column now has the ID
+        df_mentions = df[['contact_name', 'from_me', 'mentions_list']].dropna(subset=['mentions_list']).copy()
+        df_exploded = df_mentions.explode('mentions_list') 
         df_exploded['mentioned_name'] = df_exploded['mentions_list'].map(jid_map)
-        
-        # Filter for known contacts
         df_exploded = df_exploded.dropna(subset=['mentioned_name'])
         
-        # 4. Aggregation
-        # Mentions of Me (from Others)
-        # Assuming "Me" is identified by 'from_me=1' in JID map? 
-        # Actually "Me" usually doesn't have a contact_name in the JID map other than "You" (if we set it).
-        # But 'sender_jid_row_id' for ME might be null for my own messages? 
-        # Check parser: We merged 'sender_jid_row_id'. For outgoing messages, does it exist? 
-        # Usually from_me=1 messages have null sender_jid (in DB schema), but we handle "Me".
-        # Let's check who I mention:
-        
         i_mention = df_exploded[df_exploded['from_me'] == 1]['mentioned_name'].value_counts().head(top_n)
-        
-        # Who mentions Me?
-        # We need to know MY JID row id.
-        # This is tricky. simpler: "Mentions Received by Me"
-        # If I am "You", we look for rows where mentioned_name == "You".
         mentions_of_me = df_exploded[df_exploded['mentioned_name'] == 'You']['contact_name'].value_counts().head(top_n)
         
         return {'i_mention': i_mention, 'who_mentions_me': mentions_of_me}
 
-    def get_historical_stats(self):
+    def get_historical_stats(self, exclude_groups=False):
         """
         Returns:
         - First Message per chat
         - Velocity (WPM)
         """
         df = self.data.sort_values('timestamp').copy()
+        if exclude_groups: df = df[~df['is_group']]
         
         # 1. First Message
         first_msgs = df.groupby('contact_name').first()[['timestamp', 'text_data']]
-        # Sort by timestamp
         first_msgs = first_msgs.sort_values('timestamp')
         
-        # 2. Velocity (Top active sessions)
-        # Identify "sessions" (gaps < 5 min)
-        # Calculate words / duration
-        # Determine "Fastest Chatter"
-        # Simplify: Max Words Per Minute in any 1-minute bucket?
-        # Or average WPM during active bursts.
-        
+        # 2. Velocity
         df_text = df[df['text_data'].notnull()].copy()
-        df_text['word_count'] = df_text['text_data'].astype(str).str.split().str.len()
+        df_text = df_text[df_text['from_me'] == 0] # Velocity of OTHERS
         
-        # Group by Minute key
+        df_text['word_count'] = df_text['text_data'].astype(str).str.split().str.len()
         df_text['minute_key'] = df_text['timestamp'].dt.floor('min')
         
-        # Sum words per contact per minute
         wpm = df_text.groupby(['contact_name', 'minute_key'])['word_count'].sum().reset_index()
-        
-        # Calc Max WPM per contact
         max_wpm = wpm.groupby('contact_name')['word_count'].max().sort_values(ascending=False)
         
         return {'first_msgs': first_msgs, 'velocity_wpm': max_wpm}
@@ -971,14 +968,4 @@ class WhatsappAnalyzer:
         return counts
 
     def get_location_data(self):
-        """
-        Returns DF with valid locations
-        """
-        cols = ['latitude', 'longitude', 'contact_name', 'timestamp', 'place_name']
-        if 'latitude' not in self.data.columns: return pd.DataFrame()
-        
-        df = self.data.copy()
-        df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
-        df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
-        
-        return df.dropna(subset=['latitude', 'longitude'])[cols]
+        return pd.DataFrame()
