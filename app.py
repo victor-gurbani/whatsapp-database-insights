@@ -1005,39 +1005,42 @@ if 'data' in st.session_state:
         st.divider()
         col_lod1, col_lod2 = st.columns(2)
         
+        # Filter Checkbox
+        ghost_filter = st.checkbox("Hide contacts with 0 'True Ghost' value (Only show confirmed ghosts)", value=False)
+        
         with col_lod1:
              st.write("**People I Ignore** (Me → Them)")
-             # Use full_analyzer to capture 'Me' messages even if view is excluded
              my_ignore_stats = full_analyzer_tab6.get_left_on_read_stats()
-             
-             # Post-calc filter: Remove 'Me' from the list of people I ignore?
-             # No, the list contains contacts I ignore. 'Me' shouldn't be there.
-             # But if exclude_me is True, we should ensure 'Me' isn't in index if it somehow got there.
-             # Usually 'Me' isn't a target.
              
              if not my_ignore_stats.empty:
                  cols_to_plot = [c for c in my_ignore_stats.columns if c in ['True Ghost 👻', 'Left on Delivered 📨']]
-                 st.bar_chart(my_ignore_stats[cols_to_plot].head(15), horizontal=True) 
+                 data_to_plot = my_ignore_stats[cols_to_plot]
+                 
+                 if ghost_filter and 'True Ghost 👻' in data_to_plot.columns:
+                     data_to_plot = data_to_plot[data_to_plot['True Ghost 👻'] > 0]
+                 
+                 if not data_to_plot.empty:
+                     st.bar_chart(data_to_plot.head(15), horizontal=True) 
+                 else:
+                     st.info("No ghosts found with current filter.")
              else:
                  st.info("You're a saint! 😇")
 
         with col_lod2:
              st.write("**People Who Ignore Me** (Them → Me)")
-             # Use full_analyzer (need my messages to see if they ignored them)
-             # Use Advanced 'True Ghost' function which returns breakdown (Ghost vs Delivered)
              them_ignore_stats = full_analyzer_tab6.get_true_ghosting_stats(threshold_hours=24) # ghosting = them ignoring me
              
              if not them_ignore_stats.empty:
-                 # It might return a DataFrame with 'count' or 'True Ghost'/'Left on Delivered' columns?
-                 # get_ghosting_stats return structure:
-                 # pivot table with 'contact_name' index, columns: 'type' values ('True Ghost', etc)
-                 # Wait, let's check analyzer return.
-                 # get_ghosting_stats (line 353 analyzer) returns: 
-                 # stats = ghost_candidates.groupby(['chat_name', 'type']).size().unstack(fill_value=0)
-                 # So columns are 'True Ghost 👻', 'Left on Delivered 📨' etc.
-                 
                  cols_to_plot = [c for c in them_ignore_stats.columns if c in ['True Ghost 👻', 'Left on Delivered 📨']]
-                 st.bar_chart(them_ignore_stats[cols_to_plot].head(15), horizontal=True)
+                 data_to_plot = them_ignore_stats[cols_to_plot]
+                 
+                 if ghost_filter and 'True Ghost 👻' in data_to_plot.columns:
+                     data_to_plot = data_to_plot[data_to_plot['True Ghost 👻'] > 0]
+                     
+                 if not data_to_plot.empty:
+                     st.bar_chart(data_to_plot.head(15), horizontal=True)
+                 else:
+                     st.info("No ghosts found with current filter.")
              else:
                  st.info("Everyone loves you! 💖")
         
