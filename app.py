@@ -42,7 +42,7 @@ def get_config_json():
         'cfg_msgstore', 'cfg_wa', 'cfg_vcf', 'cfg_date_range',
         'cfg_ex_groups', 'cfg_ex_chan', 'cfg_ex_system', 'cfg_fam_list', 
         'cfg_ex_fam_glob', 'cfg_ex_non_con', 'cfg_ex_fam_gend', 
-        'cfg_long_stats', 'cfg_reply_thresh', 'cfg_min_word_len'
+        'cfg_long_stats', 'cfg_reply_thresh', 'cfg_min_word_len', 'cfg_ex_emails'
     ]
     for k in keys_to_save:
         if k in st.session_state:
@@ -174,6 +174,8 @@ if 'data' in st.session_state:
         value=4, 
         key="cfg_min_word_len"
     )
+    
+    exclude_emails = st.sidebar.checkbox("Exclude Emails from Word Cloud", value=False, key="cfg_ex_emails")
     
     # Apply Global Filters
     filtered_df = df_raw.copy()
@@ -440,7 +442,7 @@ if 'data' in st.session_state:
                 if wc_source == "Sent by Me": filter_me = True
                 elif wc_source == "Received by Me": filter_me = False
                 
-                text = analyzer.get_wordcloud_text(filter_from_me=filter_me, min_word_length=min_word_len)
+                text = analyzer.get_wordcloud_text(filter_from_me=filter_me, min_word_length=min_word_len, exclude_emails=exclude_emails)
                 if text:
                     wc = WordCloud(width=800, height=400, background_color='white').generate(text)
                     plt.figure(figsize=(10, 5))
@@ -535,7 +537,7 @@ if 'data' in st.session_state:
                 col_wc1, col_wc2 = st.columns(2)
                 with col_wc1:
                     st.caption("My Words")
-                    my_text = chat_analyzer.get_wordcloud_text(filter_from_me=True, min_word_length=min_word_len)
+                    my_text = chat_analyzer.get_wordcloud_text(filter_from_me=True, min_word_length=min_word_len, exclude_emails=exclude_emails)
                     if my_text:
                         wc1 = WordCloud(width=400, height=300, background_color='white').generate(my_text)
                         plt.figure(figsize=(5,4))
@@ -546,7 +548,7 @@ if 'data' in st.session_state:
                         
                 with col_wc2:
                     st.caption(f"{selected_contact}'s Words")
-                    their_text = chat_analyzer.get_wordcloud_text(filter_from_me=False, min_word_length=min_word_len)
+                    their_text = chat_analyzer.get_wordcloud_text(filter_from_me=False, min_word_length=min_word_len, exclude_emails=exclude_emails)
                     if their_text:
                         wc2 = WordCloud(width=400, height=300, background_color='white').generate(their_text)
                         plt.figure(figsize=(5,4))
