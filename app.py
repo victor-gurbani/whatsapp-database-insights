@@ -589,13 +589,34 @@ if 'data' in st.session_state:
             # Ghosting Control
             st.divider()
             gh_hours = st.slider("Ghosting Threshold (Hours)", 1, 72, 24, key=f"gh_{selected_contact}")
-            true_ghosts = analyzer.get_true_ghosting_stats(threshold_hours=gh_hours)
-            if not true_ghosts.empty and selected_contact in true_ghosts.index:
-                st.write(f"**Ghosting Stats (> {gh_hours}h)**")
-                g_row = true_ghosts.loc[selected_contact]
-                cols_g = st.columns(3)
-                cols_g[0].metric("True Ghosts 👻", int(g_row.get('True Ghost 👻', 0)), help="Read but ignored")
-                cols_g[1].metric("Left on Delivered 📨", int(g_row.get('Left on Delivered 📨', 0)), help="Never read")
+            
+            # Use FULL Analyzer for specific chat logic (needs Me + Them)
+            # Create a dedicated analyzer for this chat using BASE data (includes Me)
+            # df_base might contain all chats, so we filter by contact first logic?
+            # get_true_ghosting_stats is global but returns per contact.
+            # We can use full_analyzer_tab6 (if available globablly? No, it was local to Tab 6).
+            # Let's instantiate a specific one or use a global 'full_analyzer' if I make it available.
+            # Better: filtered full base.
+            
+            full_chat_df = df_base[df_base['chat_name'] == selected_contact]
+            full_single_analyzer = WhatsappAnalyzer(full_chat_df)
+            
+            true_ghosts = full_single_analyzer.get_true_ghosting_stats(threshold_hours=gh_hours)
+            
+            if not true_ghosts.empty:
+                # true_ghosts index is contact_name. Since we filtered to one contact, it should be there.
+                # But get_true_ghosting_stats groups by Chat Name. If contact_name is 'You' for my messages?
+                # No, get_true_ghosting_stats uses 'chat_name' column.
+                
+                # Check if selected_contact is in index
+                if selected_contact in true_ghosts.index:
+                    st.write(f"**Ghosting Stats (> {gh_hours}h)**")
+                    g_row = true_ghosts.loc[selected_contact]
+                    cols_g = st.columns(3)
+                    cols_g[0].metric("True Ghosts 👻", int(g_row.get('True Ghost 👻', 0)), help="Read but ignored")
+                    cols_g[1].metric("Left on Delivered 📨", int(g_row.get('Left on Delivered 📨', 0)), help="Never read")
+                else:
+                    st.info("No ghosting detected with current threshold.")
             else:
                 st.info("No ghosting detected with current threshold.")
             
@@ -604,7 +625,8 @@ if 'data' in st.session_state:
             ghost_thresh = 432000 if use_longer_stats else 86400
             init_thresh = 172800 if use_longer_stats else 21600
             
-            beh_timeline = chat_analyzer.get_behavioral_timeline(ghost_thresh, init_thresh)
+            # Use the FULL SINGLE ANALYZER
+            beh_timeline = full_single_analyzer.get_behavioral_timeline(ghost_thresh, init_thresh)
             
             b1, b2 = st.columns(2)
             with b1:
@@ -709,8 +731,10 @@ if 'data' in st.session_state:
         # Pass exclude_groups from sidebar
         ex_groups = exclude_groups if 'exclude_groups' in locals() else False
         
-        beh_scorecard = full_analyzer_tab6.get_behavioral_scorecard(exclude_groups=ex_groups) 
-        fun_stats = full_analyzer_tab6.get_fun_stats(top_n=top_n_val, exclude_groups=ex_groups)
+        # Force exclude_groups=True for Behavioral/Fun stats as requested (Double Text, Dry Texter)
+        # These metrics usually only make sense for 1-on-1 chats.
+        beh_scorecard = full_analyzer_tab6.get_behavioral_scorecard(exclude_groups=True)
+        fun_stats = full_analyzer_tab6.get_fun_stats(top_n=top_n_val, exclude_groups=True)
         streaks = full_analyzer_tab6.get_streak_stats(exclude_groups=ex_groups)
         killers = full_analyzer_tab6.get_conversation_killers(exclude_groups=ex_groups)
         
