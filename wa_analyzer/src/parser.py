@@ -469,11 +469,12 @@ class WhatsappParser:
             # We can reuse the JID/Contact logic but that's expensive. 
             # Simplified: Map sender_jid_row_id to raw_string using jids_df
             reactions = pd.merge(reactions, jids_df, left_on='sender_jid_row_id', right_on='jid_row_id', how='left')
-            # Assuming 'resolve_name' logic can be applied or approximated.
-            # For speed, let's just use raw_string or user.
+            
+            # Create a robust sender column
+            reactions['sender_display'] = reactions['raw_string'].fillna(reactions['sender_jid_row_id'])
             
             reactions_agg = reactions.groupby('message_row_id').apply(
-                lambda x: list(zip(x['reaction'], x['raw_string'] if 'raw_string' in x else x['sender_jid_row_id']))
+                lambda x: list(zip(x['reaction'], x['sender_display']))
             ).reset_index(name='reactions_list')
             
             merged = pd.merge(merged, reactions_agg, on='message_row_id', how='left')

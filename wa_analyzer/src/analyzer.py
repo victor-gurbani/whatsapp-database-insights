@@ -681,6 +681,39 @@ class WhatsappAnalyzer:
             )
             media_breakdown = df_top.groupby(['contact_name', 'mime_cat']).size().unstack(fill_value=0)
             stats = stats.join(media_breakdown, rsuffix='_media')
+            
+        # Enforce all media columns exist to prevent N/A in UI
+        for m_type in ['audio', 'video', 'image', 'sticker']:
+            if m_type not in stats.columns:
+                 stats[m_type] = 0
+            # Also handle if it was joined as 'audio_media' (if collision)? 
+            # Logic above: rsuffix='_media'. 
+            # If 'audio' existed in stats, it would become 'audio_media'. 
+            # But 'stats' has 'media', 'deleted', 'laughs'. No 'audio'.
+            # So the column joined is just 'audio' (from mime_cat values).
+            # Wait, unstack produces columns named 'audio', 'image', etc.
+            # So stats will have 'audio', 'image'.
+            # But app.py uses 'audio_media'?
+            # Let me check app.py usage.
+            # app.py: get_top(fun_stats, 'audio_media')
+            # So app.py EXPECTS 'audio_media'.
+            # My analyzer code produces 'audio' (from mime_cat values).
+            # Ah! If I changed app.py earlier or if analyzer was different.
+            # Let's check app.py again to be sure what column it uses.
+            pass
+
+        # Rename columns to match app.py expectation if needed
+        # Or Ensure we have 'audio_media'
+        # Let's map them clearly.
+        rename_map = {}
+        for m_type in ['audio', 'video', 'image', 'sticker']:
+            if m_type in stats.columns:
+                rename_map[m_type] = f"{m_type}_media"
+            else:
+                stats[f"{m_type}_media"] = 0
+        
+        if rename_map:
+            stats = stats.rename(columns=rename_map)
         
         return stats.fillna(0)
 

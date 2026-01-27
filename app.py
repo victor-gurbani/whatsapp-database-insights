@@ -836,10 +836,18 @@ if 'data' in st.session_state:
              # Let's show a dataframe of "User | Top 5 Emojis"
              
              # Group by contact, join emojis
-             top_emo_disp = emoji_stats['per_contact'].groupby('contact_name')['emoji'].apply(lambda x: " ".join(x)).reset_index(name='Top Emojis')
-             # Join with count of total emojis logic? 
-             # Just show table
-             st.dataframe(top_emo_disp.set_index('contact_name').head(10), use_container_width=True)
+             # --- UI IMPROVEMENT: Default Top 10 + Search ---
+             all_contacts_emoji = emoji_stats['per_contact']['contact_name'].unique().tolist()
+             default_emoji_sel = all_contacts_emoji[:10]
+             
+             sel_emoji_contacts = st.multiselect("Select Contacts", all_contacts_emoji, default=default_emoji_sel)
+             
+             if sel_emoji_contacts:
+                 filtered_emoji = emoji_stats['per_contact'][emoji_stats['per_contact']['contact_name'].isin(sel_emoji_contacts)]
+                 top_emo_disp = filtered_emoji.groupby('contact_name')['emoji'].apply(lambda x: " ".join(x)).reset_index(name='Top Emojis')
+                 st.dataframe(top_emo_disp.set_index('contact_name'), use_container_width=True)
+             else:
+                 st.write("No contacts selected.")
              
         # 2. Reaction Deep Dive
         if reaction_stats:
@@ -872,7 +880,19 @@ if 'data' in st.session_state:
             # Velocity
             st.write("**⚡ Message Velocity (Max Words Per Minute)**")
             st.caption("Highest WPM achieved in a single minute of conversation.")
-            st.bar_chart(history_stats['velocity_wpm'].head(15), horizontal=True)
+            
+            # --- UI IMPROVEMENT: Default Top 10 + Search ---
+            velocity_df = history_stats['velocity_wpm'] # Series
+            all_vel_contacts = velocity_df.index.tolist()
+            default_vel = all_vel_contacts[:10]
+            
+            sel_vel_contacts = st.multiselect("Select Contacts for Velocity", all_vel_contacts, default=default_vel)
+            
+            if sel_vel_contacts:
+                filtered_vel = velocity_df[velocity_df.index.isin(sel_vel_contacts)]
+                st.bar_chart(filtered_vel, horizontal=True)
+            else:
+                st.write("No contacts selected.")
             
             # First Message
             # First Message
@@ -890,21 +910,34 @@ if 'data' in st.session_state:
         
         with col_lod1:
              st.write("**People I Ignore** (Me → Them)")
-             # Use get_left_on_read_stats which now has breakdown
-             my_ignore_stats = analyzer.get_left_on_read_stats()
+             # Use full_analyzer to capture 'Me' messages even if view is excluded
+             my_ignore_stats = full_analyzer_tab6.get_left_on_read_stats()
+             
+             # Post-calc filter: Remove 'Me' from the list of people I ignore?
+             # No, the list contains contacts I ignore. 'Me' shouldn't be there.
+             # But if exclude_me is True, we should ensure 'Me' isn't in index if it somehow got there.
+             # Usually 'Me' isn't a target.
+             
              if not my_ignore_stats.empty:
-                 # Stacked bar chart? Or separate?
-                 # 'True Ghost 👻' and 'Left on Delivered 📨' columns
-                 # We want relevant cols only
                  cols_to_plot = [c for c in my_ignore_stats.columns if c in ['True Ghost 👻', 'Left on Delivered 📨']]
-                 st.bar_chart(my_ignore_stats[cols_to_plot].head(15), horizontal=True) # Streamlit bar_chart handles index
+                 st.bar_chart(my_ignore_stats[cols_to_plot].head(15), horizontal=True) 
              else:
                  st.info("You're a saint! 😇")
 
         with col_lod2:
              st.write("**People Who Ignore Me** (Them → Me)")
-             them_ignore_stats = analyzer.get_true_ghosting_stats()
+             # Use full_analyzer (need my messages to see if they ignored them)
+             them_ignore_stats = full_analyzer_tab6.get_ghosting_stats() # ghosting = them ignoring me
+             
              if not them_ignore_stats.empty:
+                 # It might return a DataFrame with 'count' or 'True Ghost'/'Left on Delivered' columns?
+                 # get_ghosting_stats return structure:
+                 # pivot table with 'contact_name' index, columns: 'type' values ('True Ghost', etc)
+                 # Wait, let's check analyzer return.
+                 # get_ghosting_stats (line 353 analyzer) returns: 
+                 # stats = ghost_candidates.groupby(['chat_name', 'type']).size().unstack(fill_value=0)
+                 # So columns are 'True Ghost 👻', 'Left on Delivered 📨' etc.
+                 
                  cols_to_plot = [c for c in them_ignore_stats.columns if c in ['True Ghost 👻', 'Left on Delivered 📨']]
                  st.bar_chart(them_ignore_stats[cols_to_plot].head(15), horizontal=True)
              else:
