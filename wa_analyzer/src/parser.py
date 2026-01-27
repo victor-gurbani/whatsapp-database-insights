@@ -271,15 +271,20 @@ class WhatsappParser:
         
         # message_add_on_reaction -> message_add_on -> message
         # IMPORTANT: Include 'from_me' to handle 'You' correctly
+        # message_add_on_reaction -> message_add_on -> message -> chat
+        # We need chat.jid_row_id to identify sender in 1-1 chats (where sender_jid_row_id is often NULL)
         query = """
         SELECT 
             mao.parent_message_row_id as message_row_id,
             mar.reaction,
             mao.sender_jid_row_id,
             mao.from_me,
-            mao.timestamp as reaction_timestamp
+            mao.timestamp as reaction_timestamp,
+            chat.jid_row_id as chat_jid_row_id
         FROM message_add_on_reaction mar
         JOIN message_add_on mao ON mar.message_add_on_row_id = mao._id
+        LEFT JOIN message m ON mao.parent_message_row_id = m._id
+        LEFT JOIN chat ON m.chat_row_id = chat._id
         """
         try:
             df = pd.read_sql_query(query, self.conn_msg)
@@ -468,21 +473,25 @@ class WhatsappParser:
             
             # Let's Resolve Reaction Sender Name
             # We need to map reaction_sender_jid -> Name
-            # We can reuse the JID/Contact logic but that's expensive. 
-            # Simplified: Map sender_jid_row_id to raw_string using jids_df
+            
+            # --- FALLBACK FOR 1-1 CHATS ---
+            # In 1-1 chats, 'sender_jid_row_id' is often NULL for incoming reactions (implied to be chat partner).
+            if 'chat_jid_row_id' in reactions.columns:
+                # If sender is missing (NaN or <=0) AND it's NOT from me (incoming)
+                # Then the sender IS the chat counterpart (chat_jid_row_id)
+                mask_missing = (reactions['sender_jid_row_id'].fillna(0) <= 0) & (reactions['from_me'] == 0)
+                reactions.loc[mask_missing, 'sender_jid_row_id'] = reactions.loc[mask_missing, 'chat_jid_row_id']
+            
+            # Now merge to get JID string
             reactions = pd.merge(reactions, jids_df, left_on='sender_jid_row_id', right_on='jid_row_id', how='left')
             
             # Create a robust sender column
             # Logic: If from_me=1, sender is 'You'.
-            import numpy as np
-            if 'from_me' in reactions.columns:
-                reactions['sender_display'] = np.where(
-                    reactions['from_me'] == 1, 
-                    'You', 
-                    reactions['raw_string'].fillna(reactions['sender_jid_row_id'])
-                )
-            else:
-                reactions['sender_display'] = reactions['raw_string'].fillna(reactions['sender_jid_row_id'])
+            # Resolve names (Full Contact Lookup)
+            reactions['sender_display'] = reactions.apply(
+                lambda x: 'You' if x.get('from_me') == 1 else get_name_from_id(x.get('raw_string'), x.get('user'), None),
+                axis=1
+            )
             
             # FALLBACK: If sender is explicitly '-1' (id) or string '-1', it's likely 'You' (self)
             reactions['sender_display'] = reactions['sender_display'].apply(
