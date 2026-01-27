@@ -860,9 +860,17 @@ if 'data' in st.session_state:
              # Let's show a dataframe of "User | Top 5 Emojis"
              
              # Group by contact, join emojis
-             # --- UI IMPROVEMENT: Default Top 10 + Search ---
+             # Group by contact, join emojis
+             # --- UI IMPROVEMENT: Default Top 10 (Most Active) + Search ---
+             # Get top talkers for default selection
+             top_active = full_analyzer_tab6.get_top_talkers(n=10, metric='messages')
+             default_selection = top_active['contact_name'].tolist() if not top_active.empty else []
+             
              all_contacts_emoji = emoji_stats['per_contact']['contact_name'].unique().tolist()
-             default_emoji_sel = all_contacts_emoji[:10]
+             
+             # Intersect top active with emoji contacts to ensure validity
+             default_emoji_sel = [c for c in default_selection if c in all_contacts_emoji]
+             if not default_emoji_sel: default_emoji_sel = all_contacts_emoji[:10]
              
              sel_emoji_contacts = st.multiselect("Select Contacts", all_contacts_emoji, default=default_emoji_sel)
              
@@ -908,7 +916,13 @@ if 'data' in st.session_state:
             # --- UI IMPROVEMENT: Default Top 10 + Search ---
             velocity_df = history_stats['velocity_wpm'] # Series
             all_vel_contacts = velocity_df.index.tolist()
-            default_vel = all_vel_contacts[:10]
+            
+            # Reuse default_selection (Top 10 Active) from above if available, else recalc or slice
+            if 'default_selection' in locals():
+                default_vel = [c for c in default_selection if c in all_vel_contacts]
+                if not default_vel: default_vel = all_vel_contacts[:10]
+            else:
+                 default_vel = all_vel_contacts[:10]
             
             sel_vel_contacts = st.multiselect("Select Contacts for Velocity", all_vel_contacts, default=default_vel)
             
