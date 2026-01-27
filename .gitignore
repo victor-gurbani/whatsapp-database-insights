@@ -3,4 +3,4 @@ whatsapp-msgstore-web-viewer/
 whatsapp-backup-chat-viewer/
 *.db
 *.vcf
-
+**/__pycache__/
