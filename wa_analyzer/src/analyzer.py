@@ -25,7 +25,7 @@ STOPWORDS = {
 
 class WhatsappAnalyzer:
     def __init__(self, data: pd.DataFrame):
-        self.data = data
+        self.data = data.copy()
         self.utils = Utils()
         if 'gender' not in self.data.columns:
              self.data['gender'] = self.data['contact_name'].apply(self.utils.guess_gender)

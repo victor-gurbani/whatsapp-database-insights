@@ -20,7 +20,9 @@ import datetime
 # ... (imports)
 
 # --- Config Management Functions ---
-def load_config(uploaded_file):
+# --- Config Management Functions ---
+def load_config():
+    uploaded_file = st.session_state.get('config_uploader')
     if uploaded_file is not None:
         try:
             config = json.load(uploaded_file)
@@ -31,8 +33,7 @@ def load_config(uploaded_file):
                     st.session_state[key] = [datetime.date.fromisoformat(d) for d in value]
                 else:
                     st.session_state[key] = value
-            st.success("Configuration loaded! You may need to wait for reload.")
-            st.rerun()
+            # st.rerun() not needed in callback
         except Exception as e:
             st.error(f"Error loading config: {e}")
 
@@ -53,16 +54,14 @@ def get_config_json():
                  config[k] = [d.isoformat() for d in val]
             else:
                 config[k] = val
-    return json.dumps(config, indent=2)
+    return json.dumps(config, indent=2, sort_keys=True)
 
 # Sidebar
 st.sidebar.header("Data Sources")
 
 # --- Config Import/Export UI (Top of Sidebar for Visibility) ---
 with st.sidebar.expander("💾 Configuration Manager", expanded=False):
-    uploaded_config = st.file_uploader("Import Config", type=['json'], key="config_uploader")
-    if uploaded_config:
-        load_config(uploaded_config)
+    st.file_uploader("Import Config", type=['json'], key="config_uploader", on_change=load_config)
     
     st.divider()
     
