@@ -34,15 +34,28 @@ class Utils:
         if not name:
             return 'unknown'
         
+        # 0. Handle Self (You/Me) - Default to Unknown or User Preference?
+        # Typically "You" should not be counted in gender stats of contacts.
+        # We classify as 'unknown' here, and Analyzer should filter 'from_me' rows.
+        if name.lower() in ['you', 'me', 'myself', 'yo', 'tú']:
+            return 'unknown'
+
         # 1. Clean up first name
-        # Split by hyphen if present (e.g. Jean-Pierre -> Jean)
-        name_clean = name.replace('-', ' ')
+        # Handle hyphens
+        # We split by space OR hyphen first.
+        name_clean = name.replace('-', ' ').replace('_', ' ')
+        
+        # Remove emojis/special chars (keep letters and spaces)
+        name_clean = re.sub(r'[^\w\s]', '', name_clean)
+        
+        if not name_clean:
+            return 'unknown'
+            
         first_word = name_clean.split()[0]
+        # Remove numbers if any (e.g. "Dad 2")
+        first_word = re.sub(r'\d+', '', first_word)
         
-        # Remove special chars but keep letters
-        first_word = re.sub(r'[^\w\s]', '', first_word)
-        
-        if not first_word:
+        if not first_word or len(first_word) < 2:
             return 'unknown'
             
         lower_name = first_word.lower()

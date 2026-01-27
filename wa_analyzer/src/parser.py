@@ -28,7 +28,27 @@ class WhatsappParser:
         # Query based on v3 schema analysis, joining media table and chat subject
         # Added chat.subject to identify group names
         # CHANGE: message._id as message_row_id to align with other tables
-        query = """
+        # Try obtaining from_me from key_from_me (older/standard) or from_me (newer)
+        # We will try the most common 'key_from_me' first as it is part of the PK usually.
+        query_v1 = """
+        SELECT 
+            message._id as message_row_id,
+            message.chat_row_id,
+            message.key_from_me as from_me,
+            message.timestamp,
+            message.text_data,
+            message.key_id,
+            chat.jid_row_id,
+            chat.subject,
+            message.message_type,
+            message.sender_jid_row_id,
+            message_media.mime_type
+        FROM message
+        LEFT JOIN chat ON message.chat_row_id = chat._id
+        LEFT JOIN message_media ON message._id = message_media.message_row_id
+        """
+        
+        query_v2 = """
         SELECT 
             message._id as message_row_id,
             message.chat_row_id,
@@ -45,14 +65,21 @@ class WhatsappParser:
         LEFT JOIN chat ON message.chat_row_id = chat._id
         LEFT JOIN message_media ON message._id = message_media.message_row_id
         """
+        
         try:
-            df = pd.read_sql_query(query, self.conn_msg)
-            # Convert timestamp to datetime (typically ms in WhatsApp)
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            return df
-        except Exception as e:
-            print(f"Error parsing messages: {e}")
-            return pd.DataFrame()
+            # Try V1 (key_from_me)
+            df = pd.read_sql_query(query_v1, self.conn_msg)
+        except:
+            # Fallback to V2 (from_me)
+            try:
+                df = pd.read_sql_query(query_v2, self.conn_msg)
+            except Exception as e:
+                print(f"Error parsing messages: {e}")
+                return pd.DataFrame()
+
+        # Convert timestamp to datetime (typically ms in WhatsApp)
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        return df
 
     def parse_jids(self):
         if not self.conn_msg: return pd.DataFrame()
@@ -186,9 +213,13 @@ class WhatsappParser:
         try:
             df = pd.read_sql_query(query, self.conn_msg)
             return df
-        except Exception as e:
-            print(f"Error parsing JIDs: {e}")
-            return pd.DataFrame()
+        except Exception:
+             # Fallback for old schema
+             try: 
+                 return pd.read_sql_query("SELECT _id as jid_row_id, raw_string FROM jid", self.conn_msg)
+             except Exception as e:
+                 print(f"Error parsing JIDs (Fallback): {e}")
+                 return pd.DataFrame()
 
     def parse_wa_contacts(self):
         """Parses the wa.db for display names associated with JIDs"""
@@ -333,53 +364,73 @@ class WhatsappParser:
         vcf_contacts = self.parse_vcf()
         
         # 6. Resolve Names
-        def resolve_name(row):
-            # 1. From Me Check
-            if row.get('from_me') == 1:
-                return "You"
-                
-            # 2. Determine Target JID (Sender > Chat)
-            # In groups, sender_string is the participant. In 1-on-1, it might be null or same.
-            target_jid = row.get('sender_string')
-            target_user = row.get('sender_user')
+        # Optimization: Create a JID -> Name map first for O(1) lookup
+        # This avoids applying the function row-by-row for every message if we can map JIDs.
+        
+        # 6a. Helper Name Resolver
+        def get_name_from_id(jid_raw, user_raw, subject=None, is_group=False):
+            # 1. Group Subject
+            if subject and isinstance(subject, str):
+                return subject
             
-            if not isinstance(target_jid, str):
-                # Fallback to Chat JID (1-on-1)
-                target_jid = row.get('raw_string')
-                target_user = row.get('user')
+            # 2. Group JID fallback
+            if isinstance(jid_raw, str) and jid_raw.endswith("@g.us"):
+                return "Unknown Group"
                 
-            if not isinstance(target_jid, str):
+            # 3. Valid JID check
+            if not isinstance(jid_raw, str):
                 return "Unknown"
+                
+            # 4. Clean JID
+            phone_part = jid_raw.split('@')[0]
             
-            # 3. Cleanup JID (remove server suffix for matching)
-            # raw_jid looks like 34666123456@s.whatsapp.net
-            phone_part = target_jid.split('@')[0]
-            
-            # 4. Try VCF (Fastest & User Preferred Name)
+            # 5. VCF (Fastest)
             if phone_part in vcf_contacts:
                 return vcf_contacts[phone_part]
-            
-            # Fuzzy VCF
+                
+            # 6. Fuzzy VCF
             if len(phone_part) > 9:
                 suffix = phone_part[-9:]
                 if suffix in vcf_contacts:
                     return vcf_contacts[suffix]
-                    
-            # 5. Try WA DB
+            
+            # 7. WA DB
             if not wa_contacts_df.empty:
-                match = wa_contacts_df[wa_contacts_df['jid'] == target_jid]
+                match = wa_contacts_df[wa_contacts_df['jid'] == jid_raw]
                 if not match.empty:
                     disp = match.iloc[0]['display_name']
                     if disp: return disp
+                    
+            return user_raw or phone_part
 
-            # 6. Fallback
-            # If it's a group JID (no specific sender identified?), return Subject or "Group"
-            if target_jid.endswith("@g.us"):
-                return row.get('subject') or "Unknown Group"
-                
-            return target_user or phone_part
+        # 6b. Apply to CHAT (The Conversation)
+        # For Chat Name, we use 'raw_string' (the Chat JID) and 'subject'.
+        merged['chat_name'] = merged.apply(
+            lambda x: get_name_from_id(x.get('raw_string'), x.get('user'), x.get('subject')), 
+            axis=1
+        )
 
-        merged['contact_name'] = merged.apply(resolve_name, axis=1)
+        # 6c. Apply to SENDER (The Person)
+        def resolve_sender(row):
+            if row.get('from_me') == 1:
+                return "You"
+            
+            # Use Sender JID if available (Groups), else Chat JID (1-on-1)
+            target_jid = row.get('sender_string')
+            target_user = row.get('sender_user')
+            
+            if not isinstance(target_jid, str):
+                target_jid = row.get('raw_string')
+                target_user = row.get('user')
+            
+            # Pass None for subject because Sender Name shouldn't be "Group Name"
+            return get_name_from_id(target_jid, target_user, subject=None)
+
+        merged['contact_name'] = merged.apply(resolve_sender, axis=1)
+
+        # 7. Final Cleanup
+        # Ensure timestamp
+        merged['timestamp'] = pd.to_datetime(merged['timestamp'])
         
         # --- Advanced Data Merging ---
         

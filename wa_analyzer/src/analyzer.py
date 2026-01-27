@@ -28,6 +28,8 @@ class WhatsappAnalyzer:
         self.data = data.copy()
         self.utils = Utils()
         if 'gender' not in self.data.columns:
+             # Ensure 'contact_name' is string
+             self.data['contact_name'] = self.data['contact_name'].fillna('Unknown').astype(str)
              self.data['gender'] = self.data['contact_name'].apply(self.utils.guess_gender)
         
         # Identify groups
@@ -54,27 +56,28 @@ class WhatsappAnalyzer:
     def get_top_talkers(self, n=20, metric='messages', exclude_me=False):
         """
         metric: 'messages' or 'words'
+        Returns: DataFrame with 'contact_name' (actually Chat Name), 'count', 'gender', 'is_group'
         """
         df = self.data
         if exclude_me: df = df[df['from_me'] == 0]
 
         if metric == 'words':
-            # Calculate word count locally (avoid modifying self.data permanently unless cached)
-            # Use pandas vectorized string operations for speed
-            # We filter for text messages only first to be safe/fast
+            # Calculate word count locally
             df_text = df[df['text_data'].notnull()].copy()
             df_text['wc'] = df_text['text_data'].astype(str).str.split().str.len()
             
-            counts = df_text.groupby('contact_name')['wc'].sum().sort_values(ascending=False).head(n).reset_index()
+            counts = df_text.groupby('chat_name')['wc'].sum().sort_values(ascending=False).head(n).reset_index()
             counts.columns = ['contact_name', 'count']
         else:
             # Return dataframe with count, gender, AND is_group
-            counts = df['contact_name'].value_counts().head(n).reset_index()
+            counts = df['chat_name'].value_counts().head(n).reset_index()
             counts.columns = ['contact_name', 'count']
         
-        # Mapping for efficiency
-        meta_map = self.data.drop_duplicates('contact_name').set_index('contact_name')[['gender', 'is_group']]
-        counts = counts.merge(meta_map, on='contact_name', how='left')
+        # Mapping for efficiency (from Chat Name)
+        # Note: Gender of a 'Chat' (1-on-1) is the gender of the person.
+        # Gender of a Group is None/Unknown.
+        meta_map = df.drop_duplicates('chat_name').set_index('chat_name')[['gender', 'is_group']]
+        counts = counts.merge(meta_map, left_on='contact_name', right_index=True, how='left')
         
         return counts
 
@@ -146,13 +149,31 @@ class WhatsappAnalyzer:
         # If analyzing global, we'd need to group by jid, but for Chat Explorer this is fine.
         
         # Ghosting
+        # Refined Ghosting Logic (Match usage in get_ghosting_stats)
+        max_ts = self.data['timestamp'].max()
+        
+        # Calculate effective next timestamp
+        # Logic: If next JID is different (or None), assume silence extends to NOW (max_ts)
+        # unless user abandoned app. But for stats, it counts as silence.
+        
+        # We need next_jid for the same row comparison
+        df['next_jid'] = df['jid_row_id'].shift(-1)
+        
+        same_chat = (df['jid_row_id'] == df['next_jid'])
+        
+        effective_next_ts = df['next_timestamp'].copy()
+        effective_next_ts.loc[~same_chat] = max_ts
+        effective_next_ts.loc[df['next_jid'].isna()] = max_ts
+        
+        df['effective_gap'] = (effective_next_ts - df['timestamp']).dt.total_seconds()
+        
         ghosted_by_them = df[
             (df['from_me'] == 1) & 
-            ((df['time_to_next'] > ghost_thresh) | df['time_to_next'].isna())
+            (df['effective_gap'] > ghost_thresh)
         ]
         ghosted_by_me = df[
             (df['from_me'] == 0) & 
-            ((df['time_to_next'] > ghost_thresh) | df['time_to_next'].isna())
+            (df['effective_gap'] > ghost_thresh)
         ]
         
         # Initiations (First msg or > thresh gap)
@@ -215,8 +236,12 @@ class WhatsappAnalyzer:
 
     def calculate_gender_stats(self):
         metrics = []
+        # Filter 'Me' out from gender stats 
+        # (Compare Men vs Women contacts, not Me vs Them where Me skews it)
+        df_contacts = self.data[self.data['from_me'] == 0]
+        
         for g in ['male', 'female']: 
-            g_data = self.data[self.data['gender'] == g]
+            g_data = df_contacts[df_contacts['gender'] == g]
             if g_data.empty:
                 continue
             
@@ -232,18 +257,27 @@ class WhatsappAnalyzer:
                 stats['avg_wpm'] = 0
             
             # Reply Time
-            # Reusing the existing function on filtered data is imperfect but sufficient for overview
-            # Better approach used in separate method, but keeping this simple for now
+            # Logic: Calculate time for ME (from_me=1) to reply to THEM (from_me=0).
+            # The 'gender' col in 'df_sorted' for MY messages is 'unknown'.
+            # We verify the gender of the PREVIOUS SENDER ('prev_jid').
+            
+            # Map jid_row_id -> gender (using ONLY 'Them' messages, otherwise we get 'unknown' from 'Me' rows)
+            them_data = self.data[self.data['from_me'] == 0]
+            jid_gender_map = them_data[['jid_row_id', 'gender']].dropna(subset=['jid_row_id']).drop_duplicates('jid_row_id').set_index('jid_row_id')['gender']
+            
             df_sorted = self.data.sort_values(['jid_row_id', 'timestamp']).copy()
             df_sorted['time_diff'] = df_sorted['timestamp'].diff().dt.total_seconds()
             df_sorted['prev_from_me'] = df_sorted['from_me'].shift(1)
             df_sorted['prev_jid'] = df_sorted['jid_row_id'].shift(1)
             
+            # Add partner gender to calculated rows (by mapping prev_jid)
+            df_sorted['partner_gender'] = df_sorted['prev_jid'].map(jid_gender_map)
+            
             replies = df_sorted[
                 (df_sorted['from_me'] == 1) & 
                 (df_sorted['prev_from_me'] == 0) & 
                 (df_sorted['jid_row_id'] == df_sorted['prev_jid']) &
-                (df_sorted['gender'] == g)
+                (df_sorted['partner_gender'] == g)
             ]
             
             valid_times = replies['time_diff'][replies['time_diff'] < 86400]
@@ -261,14 +295,19 @@ class WhatsappAnalyzer:
         return pd.DataFrame(metrics)
 
     def analyze_by_gender(self):
-        return self.data.groupby('gender').size()
+        # Exclude 'Me' from the pie chart
+        return self.data[self.data['from_me'] == 0].groupby('gender').size()
 
-    def get_ghosting_stats(self, threshold_seconds=86400):
+    def get_ghosting_stats(self, threshold_seconds=86400, exclude_list=None):
         """
         Identify who leaves you on read.
         Threshold: 24h (86400) or 5 days (432000)
         """
         df = self.data.sort_values(['jid_row_id', 'timestamp']).copy()
+        
+        # Filter exclusions
+        if exclude_list:
+            df = df[~df['chat_name'].isin(exclude_list)]
         
         df['next_from_me'] = df['from_me'].shift(-1)
         df['next_jid'] = df['jid_row_id'].shift(-1)
@@ -278,22 +317,43 @@ class WhatsappAnalyzer:
         
         my_msgs = df[df['from_me'] == 1]
         
-        ghosted = my_msgs[
-            (my_msgs['next_jid'] != my_msgs['jid_row_id']) | 
-            (my_msgs['time_to_next'].isna()) | 
-            (my_msgs['time_to_next'] > threshold_seconds)
-        ]
+        # Define max time to check against end of data
+        max_ts = self.data['timestamp'].max()
         
-        counts = ghosted['contact_name'].value_counts().head(20).reset_index()
+        # Logic:
+        # 1. Next msg is different chat or missing (End of Chat Block) -> Check time vs Max Date
+        # 2. Next msg is same chat -> Check time difference
+        
+        # Time to "Next Event" (Next Msg or End of Data)
+        # If next_jid != current or next is na, effective time diff is max_ts - current
+        
+        # Vectorized approach:
+        # Create 'effective_next_ts'
+        # If same chat, use next_timestamp. Else use max_ts.
+        same_chat = (my_msgs['jid_row_id'] == my_msgs['next_jid'])
+        
+        effective_next_ts = my_msgs['next_timestamp'].copy()
+        effective_next_ts.loc[~same_chat] = max_ts
+        effective_next_ts.loc[my_msgs['next_jid'].isna()] = max_ts
+        
+        time_diff = (effective_next_ts - my_msgs['timestamp']).dt.total_seconds()
+        
+        ghosted = my_msgs[time_diff > threshold_seconds]
+        
+        # Use chat_name to identify WHO is ghosting (the chat/person I'm talking to)
+        # because for my messages, contact_name is 'You'.
+        counts = ghosted['chat_name'].value_counts().head(20).reset_index()
         counts.columns = ['contact_name', 'count']
         
         # Add gender
-        gender_map = self.data.drop_duplicates('contact_name').set_index('contact_name')['gender']
+        # We need to map chat_name -> gender using 'Them' (from_me=0) to avoid 'unknown' from Me.
+        them_df = self.data[self.data['from_me'] == 0]
+        gender_map = them_df.drop_duplicates('chat_name').set_index('chat_name')['gender']
         counts['gender'] = counts['contact_name'].map(gender_map)
         
         return counts
 
-    def get_left_on_read_stats(self, threshold_seconds=86400):
+    def get_left_on_read_stats(self, threshold_seconds=86400, exclude_list=None):
         """
         Identify who YOU leave on read.
         Refined Logic:
@@ -301,6 +361,10 @@ class WhatsappAnalyzer:
         - Left on Delivered: I didn't read it (read_at is null) and didn't reply > threshold.
         """
         df = self.data.sort_values(['jid_row_id', 'timestamp']).copy()
+        
+        # Filter exclusions
+        if exclude_list:
+            df = df[~df['chat_name'].isin(exclude_list)]
         
         df['next_from_me'] = df['from_me'].shift(-1)
         df['next_jid'] = df['jid_row_id'].shift(-1)
@@ -343,12 +407,16 @@ class WhatsappAnalyzer:
         
         return stats.sort_values('Total Ignored', ascending=False)
 
-    def get_initiation_stats(self, threshold_seconds=21600):
+    def get_initiation_stats(self, threshold_seconds=21600, exclude_list=None):
         """
         Who starts conversations?
-        Threshold: 6h (21600) or 48h (172800)
         """
         df = self.data.sort_values(['jid_row_id', 'timestamp']).copy()
+        
+        # Filter exclusions
+        if exclude_list:
+            df = df[~df['chat_name'].isin(exclude_list)]
+            
         df['time_diff'] = df['timestamp'].diff().dt.total_seconds()
         df['prev_jid'] = df['jid_row_id'].shift(1)
         
@@ -360,7 +428,8 @@ class WhatsappAnalyzer:
         ].copy()
         
         their_initiations = initiations[initiations['from_me'] == 0]['contact_name'].value_counts()
-        my_initiations = initiations[initiations['from_me'] == 1]['contact_name'].value_counts()
+        # For ME, 'contact_name' is 'You', so we group by 'chat_name' to know WHO I initiated with.
+        my_initiations = initiations[initiations['from_me'] == 1]['chat_name'].value_counts()
         
         stats = pd.DataFrame({'Them': their_initiations, 'Me': my_initiations}).fillna(0)
         stats['Total'] = stats['Them'] + stats['Me']
@@ -368,7 +437,7 @@ class WhatsappAnalyzer:
         
         return stats.sort_values('Total', ascending=False).head(20)
 
-    def get_reply_time_ranking(self, min_messages=20, max_delay_seconds=43200):
+    def get_reply_time_ranking(self, min_messages=20, max_delay_seconds=43200, exclude_list=None):
         """
         Calculates average reply time per contact.
         Returns DataFrame with cols: contact_name, my_avg, their_avg (in minutes)
@@ -390,25 +459,38 @@ class WhatsappAnalyzer:
             (df['time_delta'] < max_delay_seconds)
         ]
         
-        # Group by contact
-        stats = valid_responses.groupby(['contact_name', 'from_me'])['time_delta'].mean().reset_index()
+        # Group by CHAT (not contact, because contact is 'You' for me)
+        stats = valid_responses.groupby(['chat_name', 'from_me'])['time_delta'].mean().reset_index()
         
-        # Valid contacts filter (enough messages total)
-        msg_counts = self.data['contact_name'].value_counts()
+        # Exclude list filter
+        if exclude_list:
+            stats = stats[~stats['chat_name'].isin(exclude_list)]
+        
+        # Valid contacts filter (enough messages total in the CHAT)
+        # Use chat_name for correct count
+        msg_counts = self.data['chat_name'].value_counts()
         valid_contacts = msg_counts[msg_counts >= min_messages].index
         
-        stats = stats[stats['contact_name'].isin(valid_contacts)]
+        stats = stats[stats['chat_name'].isin(valid_contacts)]
         
-        # Pivot
-        stats_pivot = stats.pivot(index='contact_name', columns='from_me', values='time_delta')
+        # Pivot on chat_name
+        # Pivot on chat_name
+        stats_pivot = stats.pivot(index='chat_name', columns='from_me', values='time_delta')
+        
+        # Ensure distinct columns [0, 1] exist
+        stats_pivot = stats_pivot.reindex(columns=[0, 1])
         stats_pivot.columns = ['their_avg', 'my_avg'] # 0=Them, 1=Me
         
         # Convert seconds to minutes
         stats_pivot = stats_pivot / 60
         
         # Merge gender for coloring
-        gender_map = self.data.drop_duplicates('contact_name').set_index('contact_name')['gender']
+        them_df = self.data[self.data['from_me'] == 0]
+        gender_map = them_df.drop_duplicates('chat_name').set_index('chat_name')['gender']
         stats_pivot['gender'] = stats_pivot.index.map(gender_map)
+        
+        # Reset index to make chat_name a column, rename to contact_name for UI checks
+        stats_pivot = stats_pivot.reset_index().rename(columns={'chat_name': 'contact_name'})
         
         return stats_pivot.dropna().reset_index()
 
@@ -657,7 +739,7 @@ class WhatsappAnalyzer:
     def get_streak_stats(self, exclude_groups=False):
         """
         Calculates the longest streak of consecutive days with messages.
-        Returns Series: contact_name -> longest_streak (int)
+        Returns Series: contact_name (Chat) -> longest_streak (int)
         """
         df = self.data.copy()
         if exclude_groups: df = df[~df['is_group']]
@@ -666,28 +748,12 @@ class WhatsappAnalyzer:
         
         results = {}
         
-        # Aggregate unique dates per contact
-        # NOTE: This groups "You" separately. 
-        # But a streak is mutual.
-        # Ideally, we group by JID (Chat) and assign to Contact Name.
-        # `df.groupby('contact_name')` separates Me (You) from Them (John).
-        # This breaks streak logic (Mon(Me), Tue(John)).
-        # CORRECT LOGIC: Group by JID (Chat). Calculate Streak per Chat.
-        # Assign Streak to the Contact Name of that Chat.
-        # If Chat is "John", assign to "John".
+        # Group by Chat Name (Conversation)
+        # Strength: This combines Me + Them into one timeline.
+        chat_dates = df.groupby('chat_name')['date'].unique()
         
-        # 1. Map JID -> Contact Name (Best effort, usually 'Others' name)
-        # We can extract a map: {jid: contact_name} where contact_name != 'You'
-        # Get one valid contact name per JID
-        jid_map = df[df['from_me'] == 0].drop_duplicates('jid_row_id').set_index('jid_row_id')['contact_name']
-        
-        # Group by JID
-        chat_dates = df.groupby('jid_row_id')['date'].unique()
-        
-        for jid, dates in chat_dates.items():
-            if len(dates) < 2:
-                # No streak
-                continue
+        for name, dates in chat_dates.items():
+            if len(dates) < 2: continue
                 
             sorted_dates = sorted(dates)
             max_streak = 1
@@ -702,11 +768,7 @@ class WhatsappAnalyzer:
                     current_streak = 1
             
             max_streak = max(max_streak, current_streak)
-            
-            # Assign to contact
-            if jid in jid_map:
-                c_name = jid_map[jid]
-                results[c_name] = max_streak
+            results[name] = max_streak
                 
         return pd.Series(results, name='longest_streak').sort_values(ascending=False)
 
@@ -795,31 +857,30 @@ class WhatsappAnalyzer:
         return {'i_mention': i_mention, 'who_mentions_me': mentions_of_me}
 
     def get_historical_stats(self, exclude_groups=False):
-        """
-        Returns:
-        - First Message per chat
-        - Velocity (WPM)
-        """
+        # Returns:
+        # - First Message per chat
+        # - Velocity (WPM)
         df = self.data.sort_values('timestamp').copy()
         if exclude_groups: df = df[~df['is_group']]
         
-        # 1. First Message
-        first_msgs = df.groupby('contact_name').first()[['timestamp', 'text_data']]
+        # 1. First Message (Use Chat Name to capture start of convo)
+        first_msgs = df.groupby('chat_name').first()[['timestamp', 'text_data']]
         first_msgs = first_msgs.sort_values('timestamp')
         
         # 2. Velocity
         df_text = df[df['text_data'].notnull()].copy()
-        df_text = df_text[df_text['from_me'] == 0] # Velocity of OTHERS
+        df_text = df_text[df_text['from_me'] == 0] # Velocity of OTHERS (default)
         
         df_text['word_count'] = df_text['text_data'].astype(str).str.split().str.len()
         df_text['minute_key'] = df_text['timestamp'].dt.floor('min')
         
+        # Velocity per SENDER (Contact Name)
         wpm = df_text.groupby(['contact_name', 'minute_key'])['word_count'].sum().reset_index()
         max_wpm = wpm.groupby('contact_name')['word_count'].max().sort_values(ascending=False)
         
         return {'first_msgs': first_msgs, 'velocity_wpm': max_wpm}
 
-    def get_true_ghosting_stats(self, threshold_hours=24):
+    def get_true_ghosting_stats(self, threshold_hours=24, exclude_list=None):
         """
         Advanced ghosting:
         - Ghosted: I sent -> They Read it (timestamp) -> No Reply > T hours.
@@ -830,6 +891,9 @@ class WhatsappAnalyzer:
         threshold_seconds = threshold_hours * 3600
         df = self.data.sort_values(['jid_row_id', 'timestamp']).copy()
         
+        if exclude_list:
+            df = df[~df['chat_name'].isin(exclude_list)]
+        
         df['next_from_me'] = df['from_me'].shift(-1)
         df['next_timestamp'] = df['timestamp'].shift(-1)
         df['next_jid'] = df['jid_row_id'].shift(-1)
@@ -837,11 +901,18 @@ class WhatsappAnalyzer:
         # Filter for MY messages
         my_msgs = df[df['from_me'] == 1].copy()
         
-        # Condition: Next message (reply) doesn't exist OR is too far away
-        # AND it's the same chat
-        is_ignored = (my_msgs['next_jid'] != my_msgs['jid_row_id']) | \
-                     ((my_msgs['next_timestamp'] - my_msgs['timestamp']).dt.total_seconds() > threshold_seconds) | \
-                     (my_msgs['next_timestamp'].isna())
+        # Refined Logic to avoid false positives at end of data
+        max_ts = self.data['timestamp'].max()
+        
+        same_chat = (my_msgs['jid_row_id'] == my_msgs['next_jid'])
+        effective_next_ts = my_msgs['next_timestamp'].copy()
+        # If switch chat or end of data, compare with Global Max Time
+        effective_next_ts.loc[~same_chat] = max_ts 
+        effective_next_ts.loc[my_msgs['next_jid'].isna()] = max_ts
+        
+        time_diff = (effective_next_ts - my_msgs['timestamp']).dt.total_seconds()
+        
+        is_ignored = time_diff > threshold_seconds
                      
         ghost_candidates = my_msgs[is_ignored]
         
@@ -851,13 +922,16 @@ class WhatsappAnalyzer:
         ghost_candidates = ghost_candidates.copy()
         ghost_candidates.loc[:, 'type'] = ghost_candidates['read_at'].apply(lambda x: 'True Ghost 👻' if pd.notnull(x) else 'Left on Delivered 📨')
         
-        stats = ghost_candidates.groupby(['contact_name', 'type']).size().unstack(fill_value=0)
+        # Use chat_name for valid contact identification
+        # True Ghosting: I sent (You) -> They (Chat Name) didn't reply.
+        stats = ghost_candidates.groupby(['chat_name', 'type']).size().unstack(fill_value=0)
         if stats.empty: return pd.DataFrame()
         
         stats['Total Ignored'] = stats.sum(axis=1)
         
         # Add Gender
-        gender_map = self.data.drop_duplicates('contact_name').set_index('contact_name')['gender']
+        them_df = self.data[self.data['from_me'] == 0]
+        gender_map = them_df.drop_duplicates('chat_name').set_index('chat_name')['gender']
         stats['gender'] = stats.index.map(gender_map)
         
         return stats.sort_values('Total Ignored', ascending=False)
@@ -920,13 +994,13 @@ class WhatsappAnalyzer:
         except ValueError:
             replies['bucket'] = 'Unknown'
             
-        distribution = replies.groupby(['contact_name', 'bucket'], observed=False).size().unstack(fill_value=0)
+        distribution = replies.groupby(['chat_name', 'bucket'], observed=False).size().unstack(fill_value=0)
         
         # Averages
-        avgs = replies.groupby('contact_name')['delta'].mean() / 60 # Minutes
+        avgs = replies.groupby('chat_name')['delta'].mean() / 60 # Minutes
         
         # Filter sparse contacts
-        counts = replies['contact_name'].value_counts()
+        counts = replies['chat_name'].value_counts()
         valid_contacts = counts[counts >= 5].index
         avgs = avgs[avgs.index.isin(valid_contacts)]
         
@@ -971,4 +1045,14 @@ class WhatsappAnalyzer:
         return counts
 
     def get_location_data(self):
+        """
+        Returns location data for mapping.
+        """
+        if 'latitude' in self.data.columns and 'longitude' in self.data.columns:
+            # Filter valid locations
+            locs = self.data.dropna(subset=['latitude', 'longitude']).copy()
+            # Filter 0,0 if that occurs as error
+            locs = locs[(locs['latitude'] != 0) | (locs['longitude'] != 0)]
+            if not locs.empty:
+                return locs
         return pd.DataFrame()

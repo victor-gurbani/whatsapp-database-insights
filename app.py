@@ -138,6 +138,13 @@ if 'data' in st.session_state:
         key="cfg_date_range"
     )
     
+    # --- Identity Status ---
+    st.sidebar.markdown("### 👤 Identity Status")
+    n_sent = len(df_raw[df_raw['from_me'] == 1])
+    n_recv = len(df_raw[df_raw['from_me'] == 0])
+    st.sidebar.caption(f"Detected **{n_sent:,}** sent and **{n_recv:,}** received messages.")
+    st.sidebar.divider()
+    
     # Exclude Groups Filter
     exclude_groups = st.sidebar.checkbox("Exclude Groups", value=False, key="cfg_ex_groups")
     
@@ -173,6 +180,7 @@ if 'data' in st.session_state:
     exclude_channels = st.sidebar.checkbox("Exclude Channels / Announcements", value=True, help="Removes WhatsApp Channels (@newsletter) and Status Broadcasts", key="cfg_ex_chan")
     exclude_system = st.sidebar.checkbox("Exclude System / Security Messages", value=True, help="Removes encryption notices and system markers (Type 7)", key="cfg_ex_system")
     exclude_family_gender = st.sidebar.checkbox("Exclude Family from GENDER Stats Only", value=False, key="cfg_ex_fam_gend")
+    exclude_family_behavior = st.sidebar.checkbox("Exclude Family from BEHAVIORAL Stats", value=False, key="cfg_ex_fam_beh")
     
     # Behavioral Config
     st.sidebar.subheader("Behavioral Config")
@@ -198,38 +206,62 @@ if 'data' in st.session_state:
     exclude_emails = st.sidebar.checkbox("Exclude Emails from Word Cloud", value=False, key="cfg_ex_emails")
     
     # Apply Global Filters
-    filtered_df = df_raw.copy()
+    # 1. Base Filters (Used for Chat Explorer & Identity)
+    df_base = df_raw.copy()
     
     # Helper for identifying non-contacts (no letters in name)
     import re
     def is_number(name):
         return not bool(re.search('[a-zA-Z]', str(name)))
 
+    # SECURITY MESSAGES (ALWAYS EXCLUDE)
+    if 'message_type' in df_base.columns:
+        df_base = df_base[df_base['message_type'] != 7]
+
     if len(date_range) == 2:
-        mask = (filtered_df['timestamp'].dt.date >= date_range[0]) & (filtered_df['timestamp'].dt.date <= date_range[1])
-        filtered_df = filtered_df.loc[mask]
-    if exclude_groups and 'raw_string' in filtered_df.columns:
-        is_group = filtered_df['raw_string'].astype(str).str.endswith('@g.us')
-        filtered_df = filtered_df[~is_group]
-    if exclude_channels and 'raw_string' in filtered_df.columns:
+        mask = (df_base['timestamp'].dt.date >= date_range[0]) & (df_base['timestamp'].dt.date <= date_range[1])
+        df_base = df_base.loc[mask]
+    if exclude_groups and 'raw_string' in df_base.columns:
+        is_group = df_base['raw_string'].astype(str).str.endswith('@g.us')
+        df_base = df_base[~is_group]
+    if exclude_channels and 'raw_string' in df_base.columns:
         # Channels usually end in @newsletter. Status is status@broadcast. Official WA is 0@s.whatsapp.net
         is_channel = (
-            filtered_df['raw_string'].astype(str).str.endswith('@newsletter') | 
-            (filtered_df['raw_string'] == 'status@broadcast') |
-            (filtered_df['raw_string'] == '0@s.whatsapp.net')
+            df_base['raw_string'].astype(str).str.endswith('@newsletter') | 
+            (df_base['raw_string'] == 'status@broadcast') |
+            (df_base['raw_string'] == '0@s.whatsapp.net')
         )
-        filtered_df = filtered_df[~is_channel]
+        df_base = df_base[~is_channel]
     
-    # System Messages (Type 7)
-    if exclude_system and 'message_type' in filtered_df.columns:
-        filtered_df = filtered_df[filtered_df['message_type'] != 7]
+    # System Messages (Type 7) - Already excluded above unconditionally
+    # if exclude_system and 'message_type' in filtered_df.columns:
+    #     filtered_df = filtered_df[filtered_df['message_type'] != 7]
         
     if exclude_family_global and family_list:
-        filtered_df = filtered_df[~filtered_df['contact_name'].isin(family_list)]
+        df_base = df_base[~df_base['chat_name'].isin(family_list)]
     if exclude_non_contacts:
         # Remove those that appear to be just numbers
-        mask_nums = filtered_df['contact_name'].apply(is_number)
-        filtered_df = filtered_df[~mask_nums]
+        mask_nums = df_base['contact_name'].apply(is_number)
+        df_base = df_base[~mask_nums]
+
+    # 2. View Filters (Used for General Stats where Me skews it)
+    filtered_df = df_base.copy()
+    if exclude_me:
+        filtered_df = filtered_df[filtered_df['from_me'] == 0]
+
+    # Update Identity Info with Phone Number attempt
+    me_jid = None
+    me_rows = df_raw[df_raw['from_me'] == 1]
+    if not me_rows.empty:
+        possible = me_rows['sender_string'].dropna().unique()
+        if len(possible) > 0:
+            me_jid = possible[0]
+    
+    me_display = me_jid.split('@')[0] if me_jid else "Unknown"
+        
+    st.sidebar.markdown(f"**User**: {me_display}")
+
+    analyzer = WhatsappAnalyzer(filtered_df)
     
     analyzer = WhatsappAnalyzer(filtered_df)
 
@@ -257,7 +289,7 @@ if 'data' in st.session_state:
             metric_arg = 'words' if rank_by_words else 'messages'
             
             # Fetch a large number first to ensure we fill the top 20 after filtering
-            top_talkers_df = analyzer.get_top_talkers(1000, metric=metric_arg) 
+            top_talkers_df = analyzer.get_top_talkers(1000, metric=metric_arg, exclude_me=exclude_me) 
             
             if cat_filter == "Only Female":
                 top_talkers_df = top_talkers_df[top_talkers_df['gender'] == 'female']
@@ -339,6 +371,10 @@ if 'data' in st.session_state:
     with tab2:
         st.header("Behavioral Analysis")
         
+        # USE FULL ANALYZER (Includes 'Me') for interactions
+        # Because we need to know if 'I' replied or initiated.
+        full_analyzer = WhatsappAnalyzer(df_base)
+        
         ghost_thresh = 432000 if use_longer_stats else 86400
         init_thresh = 172800 if use_longer_stats else 21600
         
@@ -347,7 +383,11 @@ if 'data' in st.session_state:
         with col_g:
             st.subheader("👻 Top Ghosters (Left you on read)")
             st.caption(f"Threshold: {ghost_thresh/3600:.1f} hours silence after your last msg.")
-            ghosts = analyzer.get_ghosting_stats(ghost_thresh)
+            st.info("ℹ️ 'End of Data' Logic: If a conversation extends to the very end of your message history (e.g. yesterday), it is NOT counted as ghosting.")
+            
+            bhv_exclude = family_list if exclude_family_behavior else None
+            
+            ghosts = full_analyzer.get_ghosting_stats(ghost_thresh, exclude_list=bhv_exclude)
             if not ghosts.empty:
                 fig_ghost = px.bar(ghosts, x='count', y='contact_name', orientation='h', 
                                    color='gender', title="Unanswered Threads Count",
@@ -359,7 +399,7 @@ if 'data' in st.session_state:
 
             st.divider()
             st.subheader("😶 People I Ignore (Me → Them)")
-            ignored = analyzer.get_left_on_read_stats(ghost_thresh)
+            ignored = full_analyzer.get_left_on_read_stats(ghost_thresh, exclude_list=bhv_exclude)
             if not ignored.empty:
                 # ignored is a pivot table with columns like 'True Ghost', 'Left on Delivered', 'Total Ignored'
                 # We can plot 'Total Ignored' or stack the types. Stacked is better.
@@ -384,7 +424,7 @@ if 'data' in st.session_state:
         with col_i:
             st.subheader("👋 Conversation Initiators")
             st.caption(f"Threshold: {init_thresh/3600:.1f} hours silence.")
-            initiations = analyzer.get_initiation_stats(init_thresh)
+            initiations = full_analyzer.get_initiation_stats(init_thresh, exclude_list=bhv_exclude)
             if not initiations.empty:
                 fig_init = px.bar(initiations[['Me', 'Them']], barmode='group', title="Initiations: Me vs Them")
                 st.plotly_chart(fig_init, width='stretch')
@@ -400,7 +440,11 @@ if 'data' in st.session_state:
         
         st.caption(f"Delays > {reply_threshold_hours}h ignored.")
         
-        reply_stats = analyzer.get_reply_time_ranking(min_messages=min_msgs_input, max_delay_seconds=reply_threshold_hours*3600)
+        # We need the FULL transaction history (including ME) to calculate reply times.
+        # 'analyzer' uses filtered_df which might exclude 'Me'.
+        full_analyzer = WhatsappAnalyzer(df_base)
+        
+        reply_stats = full_analyzer.get_reply_time_ranking(min_messages=min_msgs_input, max_delay_seconds=reply_threshold_hours*3600, exclude_list=bhv_exclude)
         
         if top_30_only and not reply_stats.empty:
             # Get Top 30 names
@@ -447,9 +491,14 @@ if 'data' in st.session_state:
 
     with tab3:
         st.header("Demographics")
-        gender_analyzer = analyzer
+        # Use full_analyzer to ensure Reply Time calc has 'Me' messages
+        # analyze_by_gender() handles 'from_me=0' internally for volume.
+        gender_analyzer = WhatsappAnalyzer(df_base)
+        
         if exclude_family_gender and not exclude_family_global and family_list:
-             gender_df_source = filtered_df[~filtered_df['contact_name'].isin(family_list)]
+             # Apply family filter to base for gender analysis
+             # Note: df_base includes Me. gender_stats needs Me for reply time.
+             gender_df_source = df_base[~df_base['chat_name'].isin(family_list)]
              gender_analyzer = WhatsappAnalyzer(gender_df_source)
         
         gender_counts = gender_analyzer.analyze_by_gender()
@@ -500,7 +549,8 @@ if 'data' in st.session_state:
         selected_contact = st.selectbox("Select Contact", contacts)
         
         if selected_contact:
-            sub_df = filtered_df[filtered_df['contact_name'] == selected_contact]
+            # Use df_base (includes 'Me') and filter by chat_name to get the full conversation
+            sub_df = df_base[df_base['chat_name'] == selected_contact]
             st.write(f"### Analysis: **{selected_contact}**")
             st.write(f"Total Messages: {len(sub_df)}")
             
@@ -512,9 +562,9 @@ if 'data' in st.session_state:
             col_s2.metric("Their Avg Reply Time", f"{their_reply:.1f} min")
             
             # --- Advanced Chat Stats ---
-            # --- Advanced Chat Stats ---
-            dist_them, _ = analyzer.get_advanced_reply_stats(reply_to=0)
-            dist_me, _ = analyzer.get_advanced_reply_stats(reply_to=1)
+            # Use chat_analyzer to get stats for this specific chat (efficient & correct context)
+            dist_them, _ = chat_analyzer.get_advanced_reply_stats(reply_to=0)
+            dist_me, _ = chat_analyzer.get_advanced_reply_stats(reply_to=1)
             
             st.write("### Response Time Analysis")
             
@@ -652,20 +702,53 @@ if 'data' in st.session_state:
         
         # Calculate Stats
         # Pass exclude_groups from sidebar
+        # Calculate Stats using FULL Data (Context needed for Double Text, Streaks, Killers)
+        # But we must respect exclude_me for the DISPLAY.
+        full_analyzer_tab6 = WhatsappAnalyzer(df_base)
+        
+        # Pass exclude_groups from sidebar
         ex_groups = exclude_groups if 'exclude_groups' in locals() else False
         
-        beh_scorecard = analyzer.get_behavioral_scorecard(exclude_groups=ex_groups) 
-        fun_stats = analyzer.get_fun_stats(top_n=top_n_val, exclude_groups=ex_groups)
-        streaks = analyzer.get_streak_stats(exclude_groups=ex_groups)
-        killers = analyzer.get_conversation_killers(exclude_groups=ex_groups)
+        beh_scorecard = full_analyzer_tab6.get_behavioral_scorecard(exclude_groups=ex_groups) 
+        fun_stats = full_analyzer_tab6.get_fun_stats(top_n=top_n_val, exclude_groups=ex_groups)
+        streaks = full_analyzer_tab6.get_streak_stats(exclude_groups=ex_groups)
+        killers = full_analyzer_tab6.get_conversation_killers(exclude_groups=ex_groups)
         
         # New Stats
-        # Make sure these methods accept the param or logic inside uses data
-        # I need to update analyzer for these too.
-        reaction_stats = analyzer.get_reaction_stats(exclude_groups=ex_groups)
-        emoji_stats = analyzer.get_emoji_stats(top_n=top_n_val, exclude_groups=ex_groups)
-        mention_stats = analyzer.get_mention_stats(top_n=top_n_val, exclude_groups=ex_groups)
-        history_stats = analyzer.get_historical_stats(exclude_groups=ex_groups)
+        reaction_stats = full_analyzer_tab6.get_reaction_stats(exclude_groups=ex_groups)
+        emoji_stats = full_analyzer_tab6.get_emoji_stats(top_n=top_n_val, exclude_groups=ex_groups)
+        mention_stats = full_analyzer_tab6.get_mention_stats(top_n=top_n_val, exclude_groups=ex_groups)
+        history_stats = full_analyzer_tab6.get_historical_stats(exclude_groups=ex_groups)
+        
+        # Post-Calculation Filter: Remove "You" / "Me" if exclude_me is True
+        if exclude_me:
+             # Identify 'Me' name (usually 'You', 'Me', 'Myself' or me_display)
+             # Parser ensures outgoing is mapped to "You". 
+             me_names = ['You', 'Me', 'Myself']
+             if 'me_display' in locals(): me_names.append(str(me_display)) # if resolved
+             
+             # Filter Index (usually contact_name)
+             if not beh_scorecard.empty: beh_scorecard = beh_scorecard[~beh_scorecard.index.isin(me_names)]
+             if not fun_stats.empty: fun_stats = fun_stats[~fun_stats.index.isin(me_names)]
+             if not streaks.empty: streaks = streaks[~streaks.index.isin(me_names)]
+             if not killers.empty: killers = killers[~killers.index.isin(me_names)]
+             
+             # Reaction stats is a dict
+             if reaction_stats and 'top_reactors' in reaction_stats:
+                  reaction_stats['top_reactors'] = reaction_stats['top_reactors'][~reaction_stats['top_reactors'].index.isin(me_names)]
+             
+             # Emoji stats is dict
+             # per_contact...
+             if emoji_stats and 'per_contact' in emoji_stats:
+                  # per_contact has 'contact_name' column
+                  emoji_stats['per_contact'] = emoji_stats['per_contact'][~emoji_stats['per_contact']['contact_name'].isin(me_names)]
+             
+             # Mention stats is dict
+             # who_mentions_me (index is sender)
+             if mention_stats and 'who_mentions_me' in mention_stats:
+                  mention_stats['who_mentions_me'] = mention_stats['who_mentions_me'][~mention_stats['who_mentions_me'].index.isin(me_names)]
+             # i_mention (index is target) - keep? Yes, it's who I mention.
+
         
         # Pre-calc combined media for Gallery Curator
         if 'image_media' in fun_stats.columns and 'video_media' in fun_stats.columns:
@@ -792,12 +875,13 @@ if 'data' in st.session_state:
             st.bar_chart(history_stats['velocity_wpm'].head(15), horizontal=True)
             
             # First Message
+            # First Message
             st.write("**🕰️ How it Started (First Messages)**")
             first_msgs = history_stats['first_msgs'].reset_index()
             # Select contact
-            sel_contact_hist = st.selectbox("Select Contact to see First Message:", first_msgs['contact_name'].unique())
+            sel_contact_hist = st.selectbox("Select Contact to see First Message:", first_msgs['chat_name'].unique())
             if sel_contact_hist:
-                row = first_msgs[first_msgs['contact_name'] == sel_contact_hist].iloc[0]
+                row = first_msgs[first_msgs['chat_name'] == sel_contact_hist].iloc[0]
                 st.markdown(f"**Date:** {row['timestamp']}")
                 st.markdown(f"**Message:** *\"{row['text_data']}\"*")
 
