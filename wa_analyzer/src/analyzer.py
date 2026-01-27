@@ -287,7 +287,9 @@ class WhatsappAnalyzer:
     def get_left_on_read_stats(self, threshold_seconds=86400):
         """
         Identify who YOU leave on read.
-        Logic: Last msg from THEM, > threshold silence or no reply.
+        Refined Logic:
+        - True Ghost: I read it (read_at present) but didn't reply > threshold.
+        - Left on Delivered: I didn't read it (read_at is null) and didn't reply > threshold.
         """
         df = self.data.sort_values(['jid_row_id', 'timestamp']).copy()
         
@@ -297,22 +299,40 @@ class WhatsappAnalyzer:
         
         df['time_to_next'] = (df['next_timestamp'] - df['timestamp']).dt.total_seconds()
         
+        # Their Messages (From Them)
         their_msgs = df[df['from_me'] == 0]
         
+        # Ignored Condition: No Reply OR Delayed Reply
+        # Note: Original Ghosting logic considered "Delayed Reply" as ghosting too if > threshold.
+        # "Left on Delivered" implies "Unopened".
         ignored = their_msgs[
             (their_msgs['next_jid'] != their_msgs['jid_row_id']) | 
             (their_msgs['time_to_next'].isna()) | 
             (their_msgs['time_to_next'] > threshold_seconds)
         ]
         
-        counts = ignored['contact_name'].value_counts().head(20).reset_index()
-        counts.columns = ['contact_name', 'count']
+        if ignored.empty: return pd.DataFrame()
         
-        # Add gender
+        # Check if 'read_at' exists
+        if 'read_at' in self.data.columns:
+            ignored = ignored.copy()
+            # If read_at is not null -> True Ghost 👻
+            # If read_at is null -> Left on Delivered 📨
+            ignored.loc[:, 'type'] = ignored['read_at'].apply(lambda x: 'True Ghost 👻' if pd.notnull(x) else 'Left on Delivered 📨')
+        else:
+            # Fallback if no receipts data
+            ignored['type'] = 'Ignored (No Receipts)'
+            
+        stats = ignored.groupby(['contact_name', 'type']).size().unstack(fill_value=0)
+        
+        # Add Totals
+        stats['Total Ignored'] = stats.sum(axis=1)
+        
+        # Add Gender
         gender_map = self.data.drop_duplicates('contact_name').set_index('contact_name')['gender']
-        counts['gender'] = counts['contact_name'].map(gender_map)
+        stats['gender'] = stats.index.map(gender_map)
         
-        return counts
+        return stats.sort_values('Total Ignored', ascending=False)
 
     def get_initiation_stats(self, threshold_seconds=21600):
         """
@@ -440,47 +460,41 @@ class WhatsappAnalyzer:
         stats['night_owl_pct'] = (stats['night_owl'] / stats['total']) * 100
         stats['early_bird_pct'] = (stats['early_bird'] / stats['total']) * 100
         
-        # 2. Double Texter Logic (Smart)
-        # Sort by JID (chat context) then time
-        # NOTE: For global stats, this mixes chats, but 'contact_name' grouping handles it roughly well 
-        # providing we respect JID boundaries.
+        # 2. Double Text Ratio (Refined: Turns with >1 message)
+        # Old logic ("Resumed Monologue") yielded 99%.
+        # New Logic: A "Turn" is a sequence of consecutive messages by same sender.
+        # Ratio = (Turns with > 1 message) / (Total Turns)
+        
         df_sorted = df.sort_values(['jid_row_id', 'timestamp'])
         
+        # Identify changes in sender OR chat (JID)
+        # Shift to compare with previous
         df_sorted['prev_sender'] = df_sorted['contact_name'].shift(1)
         df_sorted['prev_jid'] = df_sorted['jid_row_id'].shift(1)
-        df_sorted['time_diff'] = df_sorted['timestamp'].diff().dt.total_seconds().fillna(0)
         
-        # Define Threshold for "New Turn" within same sender (e.g. 20 mins)
-        TURN_THRESHOLD = 1200 # 20 minutes
+        # A new turn starts if Sender changes OR JID changes
+        # Strict "Conversation Turn" definition
+        change_mask = (df_sorted['contact_name'] != df_sorted['prev_sender']) | (df_sorted['jid_row_id'] != df_sorted['prev_jid'])
         
-        # A "Turn Start" is:
-        # 1. Different sender than previous
-        # 2. OR Same sender but > 20 mins gap (Double Text)
-        # 3. OR Different JID
+        # Assign Turn ID
+        df_sorted['turn_id'] = change_mask.cumsum()
         
-        # Identify "Same Sender, Same JID"
-        is_same_sender = (df_sorted['contact_name'] == df_sorted['prev_sender']) & (df_sorted['jid_row_id'] == df_sorted['prev_jid'])
+        # Aggregation: Count msgs per turn
+        # Group by Turn ID -> (Contact, Count)
+        turn_stats = df_sorted.groupby(['turn_id', 'contact_name']).size().reset_index(name='msg_count')
         
-        # A Double Text Event is: Same Sender + Same JID + Gap > Threshold
-        double_text_events = df_sorted[is_same_sender & (df_sorted['time_diff'] > TURN_THRESHOLD)]
-        dt_counts = double_text_events['contact_name'].value_counts()
+        # Now analyze per contact
+        # Total Turns
+        total_turns = turn_stats['contact_name'].value_counts()
         
-        # Total Turns for a user:
-        # We count every time they start a message block.
-        # Condition: (Sender != PrevSender) OR (Sender == PrevSender AND Time > Threshold) OR (New JID)
-        # Simplified: All messages distinct from "Same Sender & Short Gap"
-        # i.e. everything that is NOT a "continuation".
-        # Continuation = Same Sender & Same JID & Time <= Threshold
-        continuation_mask = is_same_sender & (df_sorted['time_diff'] <= TURN_THRESHOLD)
-        turn_starts = df_sorted[~continuation_mask]
-        turn_counts = turn_starts['contact_name'].value_counts()
+        # Double Text Turns (count > 1)
+        multi_msg_turns = turn_stats[turn_stats['msg_count'] > 1]['contact_name'].value_counts()
         
-        stats['double_texts'] = dt_counts
-        stats['total_turns'] = turn_counts
+        stats['total_turns'] = total_turns
+        stats['double_texts'] = multi_msg_turns
         stats = stats.fillna(0)
         
         stats['double_text_ratio'] = 0.0
-        # Filter for meaningful stats (at least 5 turns)
         mask_turns = stats['total_turns'] > 5
         stats.loc[mask_turns, 'double_text_ratio'] = (stats.loc[mask_turns, 'double_texts'] / stats.loc[mask_turns, 'total_turns']) * 100
         
@@ -490,7 +504,7 @@ class WhatsappAnalyzer:
         
         return stats
 
-    def get_fun_stats(self):
+    def get_fun_stats(self, top_n=100):
         """
         Returns stats for:
         - Laughs
@@ -498,43 +512,44 @@ class WhatsappAnalyzer:
         - Media counts
         - Review/Deleted counts
         - Dry Texter (Avg Length)
+        
+        top_n: Filter analysis to top N contacts by message volume (default 100)
         """
         df = self.data.copy()
         
+        # Filter for Top N Contacts (by volume) to keep stats relevant
+        if top_n and top_n > 0:
+             top_contacts = df['contact_name'].value_counts().head(top_n).index
+             df_top = df[df['contact_name'].isin(top_contacts)].copy()
+        else:
+             df_top = df
+             
         # 1. Laughs
-        # Regex for haha, jajaja, lol, lmao, risas, xD, 😂, 🤣
         laugh_pattern = r'(?i)(?:haha|jaja|lol|lmao|risas|xD|😂|🤣)'
-        df['has_laugh'] = df['text_data'].astype(str).str.contains(laugh_pattern, regex=True)
-        laugh_counts = df[df['has_laugh']]['contact_name'].value_counts()
+        df_top['has_laugh'] = df_top['text_data'].astype(str).str.contains(laugh_pattern, regex=True)
+        laugh_counts = df_top[df_top['has_laugh']]['contact_name'].value_counts()
         
         # 2. Media & Deleted
-        # Mime types: image/jpeg, video/mp4, audio/ogg, etc.
-        # Deleted: message_type=15 presumably (REVOKE) or specific text
-        
-        # Revokes (Type 15 is standard for revokes in some versions, but check text too)
-        # Common text: "This message was deleted", "Eliminaste este mensaje"
         revoke_pattern = r'(?i)(?:This message was deleted|Eliminaste este mensaje|Se eliminó este mensaje)'
-        is_revoked = df['text_data'].astype(str).str.fullmatch(revoke_pattern)
-        if 'message_type' in df.columns:
-            is_revoked = is_revoked | (df['message_type'] == 15)
+        is_revoked = df_top['text_data'].astype(str).str.fullmatch(revoke_pattern)
+        if 'message_type' in df_top.columns:
+            is_revoked = is_revoked | (df_top['message_type'] == 15)
             
-        deleted_counts = df[is_revoked]['contact_name'].value_counts()
+        deleted_counts = df_top[is_revoked]['contact_name'].value_counts()
         
         # Media
-        media_mask = df['mime_type'].notnull()
-        media_counts = df[media_mask]['contact_name'].value_counts()
+        media_mask = df_top['mime_type'].notnull()
+        media_counts = df_top[media_mask]['contact_name'].value_counts()
         
         # 3. Dry Texter (Avg Words)
         # Filter for TEXT messages only (no media, no revokes)
-        text_only = df[~media_mask & ~is_revoked & df['text_data'].notnull()].copy()
+        text_only = df_top[~media_mask & ~is_revoked & df_top['text_data'].notnull()].copy()
         text_only['word_count'] = text_only['text_data'].astype(str).str.split().str.len()
         
-        # Filter 0 word length (empty strings)
+        # Filter 0 word length
         text_only = text_only[text_only['word_count'] > 0]
         
         avg_len = text_only.groupby('contact_name')['word_count'].mean()
-        
-        # Filter avg_len > 0 again just in case
         avg_len = avg_len[avg_len > 0]
         
         stats = pd.DataFrame({
@@ -693,6 +708,11 @@ class WhatsappAnalyzer:
         if stats.empty: return pd.DataFrame()
         
         stats['Total Ignored'] = stats.sum(axis=1)
+        
+        # Add Gender
+        gender_map = self.data.drop_duplicates('contact_name').set_index('contact_name')['gender']
+        stats['gender'] = stats.index.map(gender_map)
+        
         return stats.sort_values('Total Ignored', ascending=False)
 
     def get_advanced_reply_stats(self, limit_hours=8, reply_to=0):

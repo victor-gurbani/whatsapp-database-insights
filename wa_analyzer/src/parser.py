@@ -39,6 +39,7 @@ class WhatsappParser:
             chat.jid_row_id,
             chat.subject,
             message.message_type,
+            message.sender_jid_row_id,
             message_media.mime_type
         FROM message
         LEFT JOIN chat ON message.chat_row_id = chat._id
@@ -317,8 +318,13 @@ class WhatsappParser:
         jids_df = self.parse_jids()
         
         # 3. Merge JIDs onto messages
-        # This brings in 'raw_string' which helps identify groups (ends with g.us)
+        # Chat JID (Group or 1-on-1 counterpart)
         merged = pd.merge(messages_df, jids_df, on='jid_row_id', how='left')
+        
+        # 3b. Merge JIDs for SENDER (for Groups)
+        # Rename columns to avoid collision
+        senders = jids_df.rename(columns={'jid_row_id': 'sender_jid_row_id', 'raw_string': 'sender_string', 'user': 'sender_user'})
+        merged = pd.merge(merged, senders, on='sender_jid_row_id', how='left')
         
         # 4. Get Names from WA DB
         wa_contacts_df = self.parse_wa_contacts()
@@ -328,42 +334,50 @@ class WhatsappParser:
         
         # 6. Resolve Names
         def resolve_name(row):
-            # Identifying Groups:
-            # If chat.subject exists, it's (almost always) a group or named chat.
-            subject = row.get('subject')
-            if subject and isinstance(subject, str):
-               return subject
-
-            raw_jid = row.get('raw_string')
-            if not isinstance(raw_jid, str):
+            # 1. From Me Check
+            if row.get('from_me') == 1:
+                return "You"
+                
+            # 2. Determine Target JID (Sender > Chat)
+            # In groups, sender_string is the participant. In 1-on-1, it might be null or same.
+            target_jid = row.get('sender_string')
+            target_user = row.get('sender_user')
+            
+            if not isinstance(target_jid, str):
+                # Fallback to Chat JID (1-on-1)
+                target_jid = row.get('raw_string')
+                target_user = row.get('user')
+                
+            if not isinstance(target_jid, str):
                 return "Unknown"
             
-            # Additional Group Check via JID suffix
-            if raw_jid.endswith("@g.us"):
-                return "Unknown Group" # Fallback if subject was null
-            
-            # Try to match with WA DB first
-            if not wa_contacts_df.empty:
-                match = wa_contacts_df[wa_contacts_df['jid'] == raw_jid]
-                if not match.empty:
-                    disp = match.iloc[0]['display_name']
-                    if disp: return disp
-                    
-            # Try to match with VCF
+            # 3. Cleanup JID (remove server suffix for matching)
             # raw_jid looks like 34666123456@s.whatsapp.net
-            phone_part = raw_jid.split('@')[0]
+            phone_part = target_jid.split('@')[0]
             
+            # 4. Try VCF (Fastest & User Preferred Name)
             if phone_part in vcf_contacts:
                 return vcf_contacts[phone_part]
             
-            # Fuzzy match: check if last 9 digits exist in VCF
+            # Fuzzy VCF
             if len(phone_part) > 9:
                 suffix = phone_part[-9:]
                 if suffix in vcf_contacts:
                     return vcf_contacts[suffix]
+                    
+            # 5. Try WA DB
+            if not wa_contacts_df.empty:
+                match = wa_contacts_df[wa_contacts_df['jid'] == target_jid]
+                if not match.empty:
+                    disp = match.iloc[0]['display_name']
+                    if disp: return disp
+
+            # 6. Fallback
+            # If it's a group JID (no specific sender identified?), return Subject or "Group"
+            if target_jid.endswith("@g.us"):
+                return row.get('subject') or "Unknown Group"
                 
-            # If nothing, use the user field (often just the phone number)
-            return row.get('user') or phone_part
+            return target_user or phone_part
 
         merged['contact_name'] = merged.apply(resolve_name, axis=1)
         

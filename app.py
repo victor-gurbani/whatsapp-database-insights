@@ -355,13 +355,25 @@ if 'data' in st.session_state:
                 st.write("No ghosting detected!")
 
             st.divider()
-            st.subheader("😶 People I Left on Read")
+            st.subheader("😶 People I Ignore (Me → Them)")
             ignored = analyzer.get_left_on_read_stats(ghost_thresh)
             if not ignored.empty:
-                fig_ignore = px.bar(ignored, x='count', y='contact_name', orientation='h',
-                                    color='gender', title="Ignored Threads Count",
-                                    color_discrete_map={'male': '#636EFA', 'female': '#EF553B', 'unknown': 'gray'})
-                fig_ignore.update_layout(yaxis={'categoryorder':'total ascending'})
+                # ignored is a pivot table with columns like 'True Ghost', 'Left on Delivered', 'Total Ignored'
+                # We can plot 'Total Ignored' or stack the types. Stacked is better.
+                # Reset index to get contact_name as column
+                ignored_reset = ignored.reset_index()
+                cols_to_plot = [c for c in ignored.columns if c in ['True Ghost 👻', 'Left on Delivered 📨']]
+                
+                # Check if ignored is empty (it might have gender but no counts if all 0, but filtering logic in analyzer handles non-empty)
+                
+                # Check for gender column (added in latest update)
+                color_arg = 'gender' if 'gender' in ignored_reset.columns else None
+                color_map = {'male': '#636EFA', 'female': '#EF553B', 'unknown': 'gray'} if color_arg else None
+
+                fig_ignore = px.bar(ignored_reset, x=cols_to_plot, y='contact_name', orientation='h',
+                                    title="Ignored Threads Count",
+                                    color=color_arg, color_discrete_map=color_map)
+                fig_ignore.update_layout(yaxis={'categoryorder':'total ascending'}, xaxis_title="Count")
                 st.plotly_chart(fig_ignore, width='stretch')
             else:
                 st.write("You reply to everyone 😇")
@@ -378,9 +390,19 @@ if 'data' in st.session_state:
         
         st.divider()
         st.subheader("⏱️ Reply Time Rankings (Avg Minutes)")
-        st.caption(f"Minimum 25 messages. Delays > {reply_threshold_hours}h ignored.")
         
-        reply_stats = analyzer.get_reply_time_ranking(min_messages=25, max_delay_seconds=reply_threshold_hours*3600)
+        rc1, rc2 = st.columns(2)
+        min_msgs_input = rc1.number_input("Min Messages", min_value=5, value=25, step=5)
+        top_30_only = rc2.checkbox("Rank Only Top 30 Contacts", value=True)
+        
+        st.caption(f"Delays > {reply_threshold_hours}h ignored.")
+        
+        reply_stats = analyzer.get_reply_time_ranking(min_messages=min_msgs_input, max_delay_seconds=reply_threshold_hours*3600)
+        
+        if top_30_only and not reply_stats.empty:
+            # Get Top 30 names
+            top_30 = analyzer.get_top_talkers(30)['contact_name'].tolist()
+            reply_stats = reply_stats[reply_stats['contact_name'].isin(top_30)]
         
         if not reply_stats.empty:
             rt_col1, rt_col2 = st.columns(2)
@@ -676,17 +698,54 @@ if 'data' in st.session_state:
             st.metric("🤐 Conversation Killer", name, f"{val} Silences (>24h)")
             
         st.divider()
-        st.subheader("📬 Left on Delivered (Unopened by Me)")
-        st.caption("People you ignore (don't read) the most.")
-        lod_stats = analyzer.get_left_on_delivered_stats()
-        if not lod_stats.empty:
-            fig_lod = px.bar(lod_stats, x='count', y='contact_name', orientation='h',
-                             title="Unread & Ignored Count",
-                             color='gender', color_discrete_map={'male': '#636EFA', 'female': '#EF553B', 'unknown': 'gray'})
-            fig_lod.update_layout(yaxis={'categoryorder':'total ascending'})
-            st.plotly_chart(fig_lod, width='stretch')
-        else:
-            st.info("You read everything! 🌟")
+        st.divider()
+        col_lod1, col_lod2 = st.columns(2)
+        
+        with col_lod1:
+             st.write("**People I Ignore** (Me → Them)")
+             # Use get_left_on_read_stats which now has breakdown
+             my_ignore_stats = analyzer.get_left_on_read_stats()
+             if not my_ignore_stats.empty:
+                 # Stacked bar chart? Or separate?
+                 # 'True Ghost 👻' and 'Left on Delivered 📨' columns
+                 # We want relevant cols only
+                 cols_to_plot = [c for c in my_ignore_stats.columns if c in ['True Ghost 👻', 'Left on Delivered 📨']]
+                 st.bar_chart(my_ignore_stats[cols_to_plot].head(15), horizontal=True) # Streamlit bar_chart handles index
+             else:
+                 st.info("You're a saint! 😇")
+
+        with col_lod2:
+             st.write("**People Who Ignore Me** (Them → Me)")
+             them_ignore_stats = analyzer.get_true_ghosting_stats()
+             if not them_ignore_stats.empty:
+                 cols_to_plot = [c for c in them_ignore_stats.columns if c in ['True Ghost 👻', 'Left on Delivered 📨']]
+                 st.bar_chart(them_ignore_stats[cols_to_plot].head(15), horizontal=True)
+             else:
+                 st.info("Everyone loves you! 💖")
+        
+        col_lod1, col_lod2 = st.columns(2)
+        
+        with col_lod1:
+             st.write("**People I Ignore** (Me → Them)")
+             # Use get_left_on_read_stats which now has breakdown
+             my_ignore_stats = analyzer.get_left_on_read_stats()
+             if not my_ignore_stats.empty:
+                 # Stacked bar chart? Or separate?
+                 # 'True Ghost 👻' and 'Left on Delivered 📨' columns
+                 # We want relevant cols only
+                 cols_to_plot = [c for c in my_ignore_stats.columns if c in ['True Ghost 👻', 'Left on Delivered 📨']]
+                 st.bar_chart(my_ignore_stats[cols_to_plot].head(15), horizontal=True) # Streamlit bar_chart handles index
+             else:
+                 st.info("You're a saint! 😇")
+
+        with col_lod2:
+             st.write("**People Who Ignore Me** (Them → Me)")
+             them_ignore_stats = analyzer.get_true_ghosting_stats()
+             if not them_ignore_stats.empty:
+                 cols_to_plot = [c for c in them_ignore_stats.columns if c in ['True Ghost 👻', 'Left on Delivered 📨']]
+                 st.bar_chart(them_ignore_stats[cols_to_plot].head(15), horizontal=True)
+             else:
+                 st.info("Everyone loves you! 💖")
             
         st.divider()
         
