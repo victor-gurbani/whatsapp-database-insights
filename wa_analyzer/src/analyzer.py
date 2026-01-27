@@ -480,7 +480,8 @@ class WhatsappAnalyzer:
         stats = stats.fillna(0)
         
         stats['double_text_ratio'] = 0.0
-        mask_turns = stats['total_turns'] > 0
+        # Filter for meaningful stats (at least 5 turns)
+        mask_turns = stats['total_turns'] > 5
         stats.loc[mask_turns, 'double_text_ratio'] = (stats.loc[mask_turns, 'double_texts'] / stats.loc[mask_turns, 'total_turns']) * 100
         
         # Add Gender
@@ -502,7 +503,7 @@ class WhatsappAnalyzer:
         
         # 1. Laughs
         # Regex for haha, jajaja, lol, lmao, risas, xD, 😂, 🤣
-        laugh_pattern = r'(?i)(haha|jaja|lol|lmao|risas|xD|😂|🤣)'
+        laugh_pattern = r'(?i)(?:haha|jaja|lol|lmao|risas|xD|😂|🤣)'
         df['has_laugh'] = df['text_data'].astype(str).str.contains(laugh_pattern, regex=True)
         laugh_counts = df[df['has_laugh']]['contact_name'].value_counts()
         
@@ -512,7 +513,7 @@ class WhatsappAnalyzer:
         
         # Revokes (Type 15 is standard for revokes in some versions, but check text too)
         # Common text: "This message was deleted", "Eliminaste este mensaje"
-        revoke_pattern = r'(?i)(This message was deleted|Eliminaste este mensaje|Se eliminó este mensaje)'
+        revoke_pattern = r'(?i)(?:This message was deleted|Eliminaste este mensaje|Se eliminó este mensaje)'
         is_revoked = df['text_data'].astype(str).str.fullmatch(revoke_pattern)
         if 'message_type' in df.columns:
             is_revoked = is_revoked | (df['message_type'] == 15)
@@ -527,7 +528,14 @@ class WhatsappAnalyzer:
         # Filter for TEXT messages only (no media, no revokes)
         text_only = df[~media_mask & ~is_revoked & df['text_data'].notnull()].copy()
         text_only['word_count'] = text_only['text_data'].astype(str).str.split().str.len()
+        
+        # Filter 0 word length (empty strings)
+        text_only = text_only[text_only['word_count'] > 0]
+        
         avg_len = text_only.groupby('contact_name')['word_count'].mean()
+        
+        # Filter avg_len > 0 again just in case
+        avg_len = avg_len[avg_len > 0]
         
         stats = pd.DataFrame({
             'laughs': laugh_counts,
@@ -606,3 +614,192 @@ class WhatsappAnalyzer:
         
         killers = df[valid_gap]['contact_name'].value_counts()
         return killers
+
+    def get_reaction_stats(self):
+        """
+        Returns stats about reactions:
+        - top_reactors: Who gives most reactions (DataFrame)
+        - top_emojis: Most used emojis (Series)
+        - most_reacted_msgs: Messages with most reactions (DataFrame)
+        """
+        if 'reactions_list' not in self.data.columns: return None
+        
+        # Explode the reactions list
+        # reactions_list contains tuples (emoji, sender_raw_string)
+        df_reacts = self.data[['message_row_id', 'contact_name', 'reactions_list', 'text_data']].dropna(subset=['reactions_list']).copy()
+        
+        all_reactions = []
+        for idx, row in df_reacts.iterrows():
+            for emoji, sender in row['reactions_list']:
+                all_reactions.append({
+                    'message_id': row['message_row_id'],
+                    'chat_contact': row['contact_name'], # The chat it happened in
+                    'reaction': emoji,
+                    'sender': sender, # RAW JID
+                    'preview': str(row['text_data'])[:50]
+                })
+        
+        if not all_reactions: return None
+        
+        feat_df = pd.DataFrame(all_reactions)
+        
+        # Top Reactors (by Sender JID) -> Need to map JID to Name if possible, 
+        # or just use 'sender' raw string if names aren't perfectly mapped there.
+        # Ideally we'd map 'sender' -> 'Display Name' using self.utils or similar map, 
+        # but for now we return raw.
+        top_reactors = feat_df['sender'].value_counts().head(10)
+        
+        # Top Emojis
+        top_emojis = feat_df['reaction'].value_counts().head(10)
+        
+        # Most Reacted Messages
+        msg_counts = feat_df.groupby(['message_id', 'preview', 'chat_contact']).size().sort_values(ascending=False).head(10).reset_index(name='count')
+        
+        return {'top_reactors': top_reactors, 'top_emojis': top_emojis, 'most_reacted': msg_counts}
+
+    def get_true_ghosting_stats(self, threshold_hours=24):
+        """
+        Advanced ghosting:
+        - Ghosted: I sent -> They Read it (timestamp) -> No Reply > T hours.
+        - Left on Delivered: I sent -> No Read -> No Reply > T hours.
+        """
+        if 'read_at' not in self.data.columns: return pd.DataFrame()
+        
+        threshold_seconds = threshold_hours * 3600
+        df = self.data.sort_values(['jid_row_id', 'timestamp']).copy()
+        
+        df['next_from_me'] = df['from_me'].shift(-1)
+        df['next_timestamp'] = df['timestamp'].shift(-1)
+        df['next_jid'] = df['jid_row_id'].shift(-1)
+        
+        # Filter for MY messages
+        my_msgs = df[df['from_me'] == 1].copy()
+        
+        # Condition: Next message (reply) doesn't exist OR is too far away
+        # AND it's the same chat
+        is_ignored = (my_msgs['next_jid'] != my_msgs['jid_row_id']) | \
+                     ((my_msgs['next_timestamp'] - my_msgs['timestamp']).dt.total_seconds() > threshold_seconds) | \
+                     (my_msgs['next_timestamp'].isna())
+                     
+        ghost_candidates = my_msgs[is_ignored]
+        
+        # Classify
+        # True Ghost: Read timestamp exists
+        # Unseen: Read timestamp is NaT
+        ghost_candidates = ghost_candidates.copy()
+        ghost_candidates.loc[:, 'type'] = ghost_candidates['read_at'].apply(lambda x: 'True Ghost 👻' if pd.notnull(x) else 'Left on Delivered 📨')
+        
+        stats = ghost_candidates.groupby(['contact_name', 'type']).size().unstack(fill_value=0)
+        if stats.empty: return pd.DataFrame()
+        
+        stats['Total Ignored'] = stats.sum(axis=1)
+        return stats.sort_values('Total Ignored', ascending=False)
+
+    def get_advanced_reply_stats(self, limit_hours=8, reply_to=0):
+        """
+        Returns:
+        - Distribution DataFrame (buckets)
+        - Fastest/Slowest Responders (Avg Minutes)
+        
+        reply_to: 
+          0 = They are replying to Me (From Them, Prev From Me) -> 'Their Speed'
+          1 = I am replying to Them (From Me, Prev From Them) -> 'My Speed'
+        """
+        df = self.data.sort_values(['jid_row_id', 'timestamp']).copy()
+        
+        df['prev_from_me'] = df['from_me'].shift(1)
+        df['prev_jid'] = df['jid_row_id'].shift(1)
+        df['delta'] = (df['timestamp'] - df['timestamp'].shift(1)).dt.total_seconds()
+        
+        # Determine strict reply condition
+        # If reply_to=0 (They -> Me): Current=0, Prev=1
+        # If reply_to=1 (Me -> Them): Current=1, Prev=0
+        target_from = 0 if reply_to == 0 else 1
+        prev_from = 1 if reply_to == 0 else 0
+        
+        replies = df[
+            (df['from_me'] == target_from) & 
+            (df['prev_from_me'] == prev_from) & 
+            (df['jid_row_id'] == df['prev_jid']) &
+            (df['delta'] < limit_hours * 3600) # Cap at limit
+        ].copy()
+        
+        if replies.empty: return None, None
+        
+        # Buckets (Detailed)
+        # <1m, 1-5m, 5-15m, 15m-1h, 1h-4h, 4h-8h, >8h
+        bins = [0, 60, 300, 900, 3600, 14400, 28800, max(28801, limit_hours*3600)]
+        labels = ['<1m', '1-5m', '5-15m', '15m-1h', '1h-4h', '4h-8h', '>8h']
+        
+        # Handle small limit cases dynamically
+        if limit_hours <= 1:
+             bins = [0, 60, 300, 900, 3600]
+             labels = ['<1m', '1-5m', '5-15m', '15m-1h']
+             
+        try:
+            replies['bucket'] = pd.cut(replies['delta'], bins=bins, labels=labels, duplicates='drop')
+        except ValueError:
+            replies['bucket'] = 'Unknown'
+            
+        distribution = replies.groupby(['contact_name', 'bucket'], observed=False).size().unstack(fill_value=0)
+        
+        # Averages
+        avgs = replies.groupby('contact_name')['delta'].mean() / 60 # Minutes
+        
+        # Filter sparse contacts
+        counts = replies['contact_name'].value_counts()
+        valid_contacts = counts[counts >= 5].index
+        avgs = avgs[avgs.index.isin(valid_contacts)]
+        
+        return distribution, avgs
+        
+    def get_left_on_delivered_stats(self, threshold_seconds=86400):
+        """
+        Identify who YOU leave on delivered (Unread & Ignored).
+        Logic: Last msg from THEM, I never read it (read_at is NaT), and silence > Threshold.
+        This implies I ignored it and didn't even open the chat (or receipts off).
+        """
+        if 'read_at' not in self.data.columns: return pd.DataFrame()
+        
+        df = self.data.sort_values(['jid_row_id', 'timestamp']).copy()
+        
+        df['next_from_me'] = df['from_me'].shift(-1)
+        df['next_jid'] = df['jid_row_id'].shift(-1)
+        df['next_timestamp'] = df['timestamp'].shift(-1)
+        
+        df['time_to_next'] = (df['next_timestamp'] - df['timestamp']).dt.total_seconds()
+        
+        their_msgs = df[df['from_me'] == 0]
+        
+        ignored = their_msgs[
+            (their_msgs['next_jid'] != their_msgs['jid_row_id']) | 
+            (their_msgs['time_to_next'].isna()) | 
+            (their_msgs['time_to_next'] > threshold_seconds)
+        ]
+        
+        # Crucial Filter: I did NOT read it.
+        # If read_at is valid, then I read it -> "Left on Read" (Ghosting).
+        # We want "Left on Delivered" -> read_at is NaT.
+        delivered_ignored = ignored[ignored['read_at'].isna()]
+        
+        counts = delivered_ignored['contact_name'].value_counts().head(20).reset_index()
+        counts.columns = ['contact_name', 'count']
+        
+        # Add gender
+        gender_map = self.data.drop_duplicates('contact_name').set_index('contact_name')['gender']
+        counts['gender'] = counts['contact_name'].map(gender_map)
+        
+        return counts
+
+    def get_location_data(self):
+        """
+        Returns DF with valid locations
+        """
+        cols = ['latitude', 'longitude', 'contact_name', 'timestamp', 'place_name']
+        if 'latitude' not in self.data.columns: return pd.DataFrame()
+        
+        df = self.data.copy()
+        df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
+        df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
+        
+        return df.dropna(subset=['latitude', 'longitude'])[cols]

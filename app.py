@@ -111,6 +111,25 @@ if 'data' in st.session_state:
     # (e.g. from loaded config), Streamlit will use that value instead.
     # We do NOT manually set session_state['cfg_date_range'] here to avoid conflicts.
     
+    # Quick Date Buttons
+    st.sidebar.caption("Quick Date Filters")
+    cols_q = st.sidebar.columns(5)
+    labels = ["3M", "6M", "1Y", "3Y", "10Y"]
+    offsets = [3, 6, 12, 36, 120] # Months
+    
+    for i, label in enumerate(labels):
+        if cols_q[i].button(label):
+            new_start = max_date - pd.DateOffset(months=offsets[i])
+            # Convert to date object because date_input expects dates
+            new_start = new_start.date()
+            if new_start < min_date: new_start = min_date
+            st.session_state['cfg_date_range'] = [new_start, max_date]
+            st.rerun()
+
+    if st.sidebar.button("Reset Date"):
+         st.session_state['cfg_date_range'] = [min_date, max_date]
+         st.rerun()
+    
     date_range = st.sidebar.date_input(
         "Date Range", 
         value=[min_date, max_date], 
@@ -220,7 +239,7 @@ if 'data' in st.session_state:
     col4.metric("Unique Contacts", stats['unique_contacts'])
 
     # --- Tabs ---
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Activity & Top Users", "🔥 Behavioral Patterns", "👫 Gender Insights", "📝 Word Cloud", "🔍 Chat Explorer", "🎪 Fun & Insights"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["📊 Activity & Top Users", "🔥 Behavioral Patterns", "👫 Gender Insights", "📝 Word Cloud", "🔍 Chat Explorer", "🎪 Fun & Insights", "🗺️ Map"])
 
     with tab1:
         col_l, col_r = st.columns(2)
@@ -467,6 +486,44 @@ if 'data' in st.session_state:
             col_s1.metric("My Avg Reply Time", f"{my_reply:.1f} min")
             col_s2.metric("Their Avg Reply Time", f"{their_reply:.1f} min")
             
+            # --- Advanced Chat Stats ---
+            # --- Advanced Chat Stats ---
+            dist_them, _ = analyzer.get_advanced_reply_stats(reply_to=0)
+            dist_me, _ = analyzer.get_advanced_reply_stats(reply_to=1)
+            
+            st.write("### Response Time Analysis")
+            
+            col_d1, col_d2 = st.columns(2)
+            
+            with col_d1:
+                st.write("**Their Speed (Them → Me)**")
+                if dist_them is not None and selected_contact in dist_them.index:
+                    row = dist_them.loc[selected_contact]
+                    fig_dist = px.bar(x=row.index, y=row.values, labels={'x': 'Time', 'y': 'Count'}, title=f"{selected_contact}'s Speed")
+                    st.plotly_chart(fig_dist, use_container_width=True)
+                else: st.caption("No data")
+                    
+            with col_d2:
+                st.write("**My Speed (Me → Them)**")
+                if dist_me is not None and selected_contact in dist_me.index:
+                    row_me = dist_me.loc[selected_contact]
+                    fig_dist_me = px.bar(x=row_me.index, y=row_me.values, labels={'x': 'Time', 'y': 'Count'}, title="My Speed")
+                    fig_dist_me.update_traces(marker_color='#EF553B')
+                    st.plotly_chart(fig_dist_me, use_container_width=True)
+                
+            # Ghosting Control
+            st.divider()
+            gh_hours = st.slider("Ghosting Threshold (Hours)", 1, 72, 24, key=f"gh_{selected_contact}")
+            true_ghosts = analyzer.get_true_ghosting_stats(threshold_hours=gh_hours)
+            if not true_ghosts.empty and selected_contact in true_ghosts.index:
+                st.write(f"**Ghosting Stats (> {gh_hours}h)**")
+                g_row = true_ghosts.loc[selected_contact]
+                cols_g = st.columns(3)
+                cols_g[0].metric("True Ghosts 👻", int(g_row.get('True Ghost 👻', 0)), help="Read but ignored")
+                cols_g[1].metric("Left on Delivered 📨", int(g_row.get('Left on Delivered 📨', 0)), help="Never read")
+            else:
+                st.info("No ghosting detected with current threshold.")
+            
             st.subheader("Behavioral Timeline")
             # Get behavioral timeline data
             ghost_thresh = 432000 if use_longer_stats else 86400
@@ -612,12 +669,24 @@ if 'data' in st.session_state:
             else: name, val = "N/A", 0
             st.metric("🔥 Streak Master", name, f"{val} Days")
             
-        with hof_6:
             if not killers.empty:
                 name = killers.index[0]
                 val = killers.iloc[0]
             else: name, val = "N/A", 0
             st.metric("🤐 Conversation Killer", name, f"{val} Silences (>24h)")
+            
+        st.divider()
+        st.subheader("📬 Left on Delivered (Unopened by Me)")
+        st.caption("People you ignore (don't read) the most.")
+        lod_stats = analyzer.get_left_on_delivered_stats()
+        if not lod_stats.empty:
+            fig_lod = px.bar(lod_stats, x='count', y='contact_name', orientation='h',
+                             title="Unread & Ignored Count",
+                             color='gender', color_discrete_map={'male': '#636EFA', 'female': '#EF553B', 'unknown': 'gray'})
+            fig_lod.update_layout(yaxis={'categoryorder':'total ascending'})
+            st.plotly_chart(fig_lod, width='stretch')
+        else:
+            st.info("You read everything! 🌟")
             
         st.divider()
         
@@ -645,6 +714,29 @@ if 'data' in st.session_state:
                                  color='gender', color_discrete_map={'male': '#636EFA', 'female': '#EF553B', 'unknown': 'gray'})
                 fig_dry.update_layout(yaxis={'categoryorder':'total descending'}, xaxis_title="Avg Words/Msg")
                 st.plotly_chart(fig_dry, width='stretch')
+        
+        st.divider()
+        st.subheader("👍 Reaction Highlights")
+        r_stats = analyzer.get_reaction_stats()
+        if r_stats:
+             c_r1, c_r2 = st.columns(2)
+             with c_r1:
+                 st.write("**Top Emojis**")
+                 st.dataframe(r_stats['top_emojis'])
+             with c_r2: 
+                 st.write("**Most Reacted Messages**")
+                 st.dataframe(r_stats['most_reacted'][['preview', 'count', 'chat_contact']])
+        else:
+            st.info("No reactions found.")
+
+    with tab7:
+        st.header("🗺️ Location Map")
+        loc_data = analyzer.get_location_data()
+        if not loc_data.empty:
+            st.map(loc_data, latitude='latitude', longitude='longitude')
+            st.dataframe(loc_data[['contact_name', 'timestamp', 'place_name']])
+        else:
+            st.info("No location data found in this backup.")
 
 else:
     st.info("👈 Please enter file paths.")
