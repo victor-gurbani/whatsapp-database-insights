@@ -641,6 +641,66 @@ class WhatsappAnalyzer:
         
         return stats_pivot.dropna().reset_index()
 
+    def get_write_time_ranking(self, min_messages=25, max_delay_seconds=10800, exclude_list=None):
+        """
+        Calculates average write time per contact (Read -> Send).
+        Threshold: max_delay_seconds (default 180 min).
+        Returns DataFrame with cols: contact_name, my_avg, their_avg (in minutes)
+        """
+        if 'read_at' not in self.data.columns:
+            return pd.DataFrame()
+
+        df = self.data.sort_values(['jid_row_id', 'timestamp']).copy()
+        
+        # Exclude System messages
+        if 'message_type' in df.columns:
+            df = df[df['message_type'] != 7]
+
+        # Shift to get adjacency
+        df['prev_from_me'] = df['from_me'].shift(1)
+        df['prev_jid'] = df['jid_row_id'].shift(1)
+        df['prev_read_at'] = df['read_at'].shift(1)
+        
+        # My Write Time: current from_me=1, prev from_me=0 (Their msg), same jid, prev_read_at exists
+        my_mask = (df['jid_row_id'] == df['prev_jid']) & (df['from_me'] == 1) & (df['prev_from_me'] == 0) & (df['prev_read_at'].notnull())
+        my_replies = df[my_mask].copy()
+        
+        # Their Write Time: current from_me=0, prev from_me=1 (My msg), same jid, prev_read_at exists
+        their_mask = (df['jid_row_id'] == df['prev_jid']) & (df['from_me'] == 0) & (df['prev_from_me'] == 1) & (df['prev_read_at'].notnull())
+        their_replies = df[their_mask].copy()
+
+        # Calculate and Sanitize
+        for d in [my_replies, their_replies]:
+            if not d.empty:
+                d['write_time'] = (d['timestamp'] - d['prev_read_at']).dt.total_seconds()
+                d.loc[d['write_time'].between(-60, 0), 'write_time'] = 0 # Handle race conditions
+                # Filter out > 180 min (considered new sessions or idle)
+                d.drop(d[~d['write_time'].between(0, max_delay_seconds)].index, inplace=True)
+
+        my_stats = my_replies.groupby('chat_name')['write_time'].mean().reset_index(name='my_avg')
+        their_stats = their_replies.groupby('chat_name')['write_time'].mean().reset_index(name='their_avg')
+        
+        stats = pd.merge(my_stats, their_stats, on='chat_name', how='outer')
+        
+        if exclude_list:
+            stats = stats[~stats['chat_name'].isin(exclude_list)]
+            
+        # Min message filter (total in chat)
+        msg_counts = self.data['chat_name'].value_counts()
+        valid_contacts = msg_counts[msg_counts >= min_messages].index
+        stats = stats[stats['chat_name'].isin(valid_contacts)]
+        
+        # Seconds to Minutes
+        stats['my_avg'] = stats['my_avg'] / 60
+        stats['their_avg'] = stats['their_avg'] / 60
+        
+        # Add gender
+        them_df = self.data[self.data['from_me'] == 0]
+        gender_map = them_df.drop_duplicates('chat_name').set_index('chat_name')['gender']
+        stats['gender'] = stats['chat_name'].map(gender_map)
+        
+        return stats.rename(columns={'chat_name': 'contact_name'}).dropna(subset=['my_avg', 'their_avg'], how='all')
+
     def get_wordcloud_text(self, contact_name=None, filter_from_me=None, min_word_length=0, exclude_emails=False):
         """
         filter_from_me: True (only My words), False (only Their words), None (All)

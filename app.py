@@ -494,6 +494,56 @@ if 'data' in st.session_state:
         else:
             st.info("Not enough conversation data to calculate reply times (need >25 messages).")
 
+        st.divider()
+        st.subheader("✍️ Write Time Rankings (Avg Minutes)")
+        st.caption("Read receipt -> Send reply. Shows actual typing/composition time.")
+        st.write("*(Note: Requires 'Read Receipts' to be enabled on both ends for accurate data)*")
+        
+        write_stats = full_analyzer.get_write_time_ranking(min_messages=min_msgs_input, max_delay_seconds=10800, exclude_list=bhv_exclude)
+        
+        if top_30_only and not write_stats.empty:
+            # Use same top_30 logic
+            top_30 = analyzer.get_top_talkers(30)['contact_name'].tolist()
+            write_stats = write_stats[write_stats['contact_name'].isin(top_30)]
+
+        if not write_stats.empty:
+            wt_col1, wt_col2 = st.columns(2)
+            
+            # Colors
+            color_map = {'male': '#636EFA', 'female': '#EF553B', 'unknown': 'gray'}
+            
+            with wt_col1:
+                st.write("**Who takes the SHORTEST to write a reply to me?**")
+                fastest_wt_them = write_stats.nsmallest(8, 'their_avg')
+                fig_fwt = px.bar(fastest_wt_them, x='their_avg', y='contact_name', orientation='h', 
+                                 color='gender', color_discrete_map=color_map, title="Lowest Avg Write Time (Them)")
+                fig_fwt.update_layout(yaxis={'categoryorder':'total descending'}, xaxis_title="Minutes")
+                st.plotly_chart(fig_fwt, width='stretch')
+                
+                st.write("**Who takes the LONGEST to write a reply to me?**")
+                slowest_wt_them = write_stats.nlargest(8, 'their_avg')
+                fig_swt = px.bar(slowest_wt_them, x='their_avg', y='contact_name', orientation='h', 
+                                 color='gender', color_discrete_map=color_map, title="Highest Avg Write Time (Them)")
+                fig_swt.update_layout(yaxis={'categoryorder':'total ascending'}, xaxis_title="Minutes")
+                st.plotly_chart(fig_swt, width='stretch')
+                
+            with wt_col2:
+                st.write("**Who do I take the SHORTEST to write back to?**")
+                fastest_wt_me = write_stats.nsmallest(8, 'my_avg')
+                fig_fwm = px.bar(fastest_wt_me, x='my_avg', y='contact_name', orientation='h',
+                                 color='gender', color_discrete_map=color_map, title="My Lowest Avg Write Time")
+                fig_fwm.update_layout(yaxis={'categoryorder':'total descending'}, xaxis_title="Minutes")
+                st.plotly_chart(fig_fwm, width='stretch')
+                
+                st.write("**Who do I take the LONGEST to write back to?**")
+                slowest_wt_me = write_stats.nlargest(8, 'my_avg')
+                fig_swm = px.bar(slowest_wt_me, x='my_avg', y='contact_name', orientation='h',
+                                 color='gender', color_discrete_map=color_map, title="My Highest Avg Write Time")
+                fig_swm.update_layout(yaxis={'categoryorder':'total ascending'}, xaxis_title="Minutes")
+                st.plotly_chart(fig_swm, width='stretch')
+        else:
+            st.info("No write time history found (Receipts might be disabled).")
+
     with tab3:
         st.header("Demographics")
         # Use full_analyzer to ensure Reply Time calc has 'Me' messages
