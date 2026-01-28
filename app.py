@@ -629,6 +629,23 @@ if 'data' in st.session_state:
             
             st.caption("ℹ️ **Calculation Method**: Time elapsed between a received message and your first subsequent reply (and vice versa). Does not account for 'Read' time, only delivery/sent timestamps.")
             
+            # Avg Write Time (Read -> Reply)
+            my_write, their_write = chat_analyzer.calculate_chat_write_times()
+            
+            col_w1, col_w2 = st.columns(2)
+            
+            w_help = "Time between READING the message (Blue Tick) and SENDING the reply."
+            
+            if my_write is not None:
+                col_w1.metric("My Avg Write Time", f"{my_write:.1f} min", help=w_help)
+            else:
+                col_w1.metric("My Avg Write Time", "N/A", help="Cannot calculate: Database missing 'Read' timestamps for incoming messages.")
+                
+            if their_write is not None:
+                col_w2.metric("Their Avg Write Time", f"{their_write:.1f} min", help=w_help)
+            else:
+                col_w2.metric("Their Avg Write Time", "N/A", help="No read receipts available for calculation.")
+
             # --- Advanced Chat Stats --- (Use chat_analyzer for specific context)
             dist_them, _ = chat_analyzer.get_advanced_reply_stats(reply_to=0)
             dist_me, _ = chat_analyzer.get_advanced_reply_stats(reply_to=1)

@@ -234,6 +234,58 @@ class WhatsappAnalyzer:
         
         return (my_avg / 60 if pd.notnull(my_avg) else 0), (their_avg / 60 if pd.notnull(their_avg) else 0)
 
+    def calculate_chat_write_times(self):
+        """
+        Calculates avg WRITE time (Read -> Send Reply).
+        Different from Reply Time (Received -> Send Reply).
+        Returns: (my_avg_min, their_avg_min)
+        """
+        df = self.data.sort_values(['timestamp']).copy()
+        
+        # We need previous message details
+        # Shift 1 to get the message I am replying TO
+        df['prev_from_me'] = df['from_me'].shift(1)
+        df['prev_read_at'] = df['read_at'].shift(1) # When the PREVIOUS message was read
+        df['prev_timestamp'] = df['timestamp'].shift(1)
+        
+        # My Write Time: 
+        # I am replying (from_me=1) to Their Msg (prev_from_me=0).
+        # Time = My Timestamp - When I read Their Msg (prev_read_at).
+        # Note: 'read_at' on Incoming Message = When I read it.
+        # This is often missing in DB.
+        my_replies = df[
+            (df['from_me'] == 1) & 
+            (df['prev_from_me'] == 0) & 
+            (df['prev_read_at'].notnull())
+        ].copy()
+        
+        if not my_replies.empty:
+            my_replies['write_time'] = (my_replies['timestamp'] - my_replies['prev_read_at']).dt.total_seconds()
+            # Filter outliers (> 24h) and negative times (impossible)
+            my_replies = my_replies[(my_replies['write_time'] > 0) & (my_replies['write_time'] < 86400)]
+            my_avg = my_replies['write_time'].mean()
+        else:
+            my_avg = None
+
+        # Their Write Time:
+        # They are replying (from_me=0) to My Msg (prev_from_me=1).
+        # Time = Their Timestamp - When They read My Msg (prev_read_at).
+        # Note: 'read_at' on Outgoing Message = When they read it.
+        their_replies = df[
+            (df['from_me'] == 0) & 
+            (df['prev_from_me'] == 1) & 
+            (df['prev_read_at'].notnull())
+        ].copy()
+        
+        if not their_replies.empty:
+            their_replies['write_time'] = (their_replies['timestamp'] - their_replies['prev_read_at']).dt.total_seconds()
+            their_replies = their_replies[(their_replies['write_time'] > 0) & (their_replies['write_time'] < 86400)]
+            their_avg = their_replies['write_time'].mean()
+        else:
+            their_avg = None
+            
+        return (my_avg / 60 if pd.notnull(my_avg) else None), (their_avg / 60 if pd.notnull(their_avg) else None)
+
     def calculate_gender_stats(self):
         metrics = []
         # Filter 'Me' out from gender stats 
