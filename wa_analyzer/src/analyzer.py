@@ -114,19 +114,20 @@ class WhatsappAnalyzer:
         if exclude_me: df = df[df['from_me'] == 0]
 
         if split_by:
+            # Default target column
             col = 'gender' if split_by == 'gender' else 'is_group'
-            
+            target_df = df
+
             if split_by == 'group':
-                df_temp = df.copy()
-                df_temp['type'] = df_temp['is_group'].map({True: 'Group', False: 'Individual'})
+                target_df = df.copy()
+                target_df['type'] = target_df['is_group'].map({True: 'Group', False: 'Individual'})
                 col = 'type'
             elif split_by == 'sender':
-                df_temp = df.copy()
-                df_temp['sender'] = df_temp['from_me'].map({1: 'Me', 0: 'Them'})
+                target_df = df.copy()
+                target_df['sender'] = target_df['from_me'].map({1: 'Me', 0: 'Them'})
                 col = 'sender'
-                return df_temp.set_index('timestamp').groupby(col).resample('ME').size().unstack(level=0).fillna(0)
-            
-            return df.set_index('timestamp').groupby(col).resample('ME').size().unstack(level=0).fillna(0)
+
+            return target_df.set_index('timestamp').groupby(col).resample('ME').size().unstack(level=0).fillna(0)
         else:
             return df.set_index('timestamp').resample('ME').size()
 
