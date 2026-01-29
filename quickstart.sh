@@ -19,6 +19,14 @@ for arg in "$@"; do
     fi
 done
 
+# Termux detection and setup
+if [ -n "$TERMUX_VERSION" ]; then
+    echo "🤖 Termux environment detected!"
+    USE_VENV=false
+    echo "📦 Installing required packages via pkg..."
+    pkg install -y python-numpy matplotlib python-pyarrow
+fi
+
 # --- 1. Clone or navigate into the repo ---
 if [ -d ".git" ] && git remote get-url origin 2>/dev/null | grep -q "$REPO_NAME"; then
     echo "✅ Already inside the repository"
