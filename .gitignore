@@ -4,3 +4,9 @@ whatsapp-backup-chat-viewer/
 *.db
 *.vcf
 **/__pycache__/
+*.sqlite
+*.vcf
+
+*.pyc
+.ipynb_checkpoints
+.env

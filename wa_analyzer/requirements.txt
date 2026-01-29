@@ -1,9 +1,10 @@
+streamlit
 pandas
+plotly
 matplotlib
 seaborn
 wordcloud
+emoji
 gender-guesser
 vobject
 attrs
-streamlit
-plotly
