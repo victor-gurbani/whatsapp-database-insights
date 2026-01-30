@@ -124,8 +124,30 @@ class WhatsappParser:
             return {}
 
         contacts = {}
-        with open(self.vcf_path, 'r') as f:
-            for vcard in vobject.readComponents(f):
+        
+        # Try multiple encodings to handle VCF files from different systems
+        encodings_to_try = ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252', 'iso-8859-1']
+        vcf_content = None
+        
+        for encoding in encodings_to_try:
+            try:
+                with open(self.vcf_path, 'r', encoding=encoding, errors='ignore') as f:
+                    vcf_content = f.read()
+                break  # Success, stop trying
+            except (UnicodeDecodeError, UnicodeError):
+                continue
+        
+        if vcf_content is None:
+            # Last resort: read as binary and decode with errors ignored
+            try:
+                with open(self.vcf_path, 'rb') as f:
+                    vcf_content = f.read().decode('utf-8', errors='ignore')
+            except Exception:
+                return {}
+        
+        # Parse vcards from the content string
+        try:
+            for vcard in vobject.readComponents(vcf_content):
                 try:
                     name = vcard.fn.value
                     # Extract phones
@@ -142,6 +164,10 @@ class WhatsappParser:
                                     contacts[digits[-9:]] = name
                 except Exception:
                     pass
+        except Exception:
+            # If vobject fails entirely, return empty contacts
+            pass
+            
         return contacts
 
     def parse_reactions(self):
