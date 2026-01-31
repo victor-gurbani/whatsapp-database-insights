@@ -430,10 +430,38 @@ if 'data' in st.session_state:
             st.caption(f"Threshold: {init_thresh/3600:.1f} hours silence.")
             initiations = full_analyzer.get_initiation_stats(init_thresh, exclude_list=bhv_exclude)
             if not initiations.empty:
+                # Overall summary stats
+                total_me = initiations['Me'].sum()
+                total_them = initiations['Them'].sum()
+                total_all = total_me + total_them
+                pct_me = (total_me / total_all * 100) if total_all > 0 else 0
+                pct_them = (total_them / total_all * 100) if total_all > 0 else 0
+                
+                init_c1, init_c2 = st.columns(2)
+                init_c1.metric("Started by Me", f"{pct_me:.1f}%", help=f"{int(total_me):,} conversations")
+                init_c2.metric("Started by Them", f"{pct_them:.1f}%", help=f"{int(total_them):,} conversations")
+                
                 fig_init = px.bar(initiations[['Me', 'Them']], barmode='group', title="Initiations: Me vs Them")
                 st.plotly_chart(fig_init, width='stretch')
             else:
                 st.write("Not enough data.")
+            
+            # First Message Stats (Who broke the ice)
+            st.divider()
+            st.subheader("🧊 First Message (Who Broke the Ice)")
+            st.caption("Who sent the very first message in each chat.")
+            
+            first_me, first_them, total_chats = full_analyzer.get_first_message_stats(exclude_list=bhv_exclude)
+            
+            if total_chats > 0:
+                pct_first_me = (first_me / total_chats * 100)
+                pct_first_them = (first_them / total_chats * 100)
+                
+                first_c1, first_c2 = st.columns(2)
+                first_c1.metric("I Started", f"{pct_first_me:.1f}%", help=f"{first_me:,} of {total_chats:,} chats")
+                first_c2.metric("They Started", f"{pct_first_them:.1f}%", help=f"{first_them:,} of {total_chats:,} chats")
+            else:
+                st.write("No chat data available.")
         
         st.divider()
         st.subheader("⏱️ Reply Time Rankings (Avg Minutes)")

@@ -587,6 +587,26 @@ class WhatsappAnalyzer:
         
         return stats.sort_values('Total', ascending=False).head(20)
 
+    def get_first_message_stats(self, exclude_list=None):
+        """
+        Who sent the very FIRST message in each chat? (Who broke the ice)
+        Returns: (started_by_me, started_by_them, total_chats)
+        """
+        df = self.data.copy()
+        
+        # Filter exclusions
+        if exclude_list:
+            df = df[~df['chat_name'].isin(exclude_list)]
+        
+        # Get the first message per chat (by jid_row_id or chat_name)
+        first_msgs = df.sort_values('timestamp').groupby('chat_name').first().reset_index()
+        
+        started_by_me = (first_msgs['from_me'] == 1).sum()
+        started_by_them = (first_msgs['from_me'] == 0).sum()
+        total_chats = len(first_msgs)
+        
+        return started_by_me, started_by_them, total_chats
+
     def get_reply_time_ranking(self, min_messages=20, max_delay_seconds=43200, exclude_list=None):
         """
         Calculates average reply time per contact.
