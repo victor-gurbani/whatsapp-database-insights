@@ -13,3 +13,7 @@ whatsapp-backup-chat-viewer/
 
 .venv/
 venv
+
+TODO.*
+debug_*
+wa_report_output/
