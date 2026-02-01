@@ -16,6 +16,34 @@ st.title("💬 WhatsApp Interactive Analyzer")
 
 import json
 import datetime
+import numpy as np
+
+# --- Helper: Calculate Correlation Matrix Text ---
+def get_correlation_text(df):
+    """
+    Calculate Pearson correlations between columns of a DataFrame.
+    Returns a formatted string showing correlation pairs.
+    """
+    if df is None or df.empty or len(df.columns) < 2:
+        return None
+    
+    # Drop rows with NaN to get valid correlation
+    df_clean = df.dropna()
+    if len(df_clean) < 3:  # Need at least 3 data points
+        return None
+    
+    cols = df.columns.tolist()
+    correlations = []
+    
+    for i in range(len(cols)):
+        for j in range(i + 1, len(cols)):
+            corr = df_clean[cols[i]].corr(df_clean[cols[j]])
+            if pd.notna(corr):
+                # Format: positive = move together, negative = opposite
+                direction = "↗↗" if corr > 0.5 else "↗↘" if corr < -0.5 else "→"
+                correlations.append(f"**{cols[i]}** vs **{cols[j]}**: r={corr:.2f} {direction}")
+    
+    return " | ".join(correlations) if correlations else None
 
 # ... (imports)
 
@@ -330,12 +358,18 @@ if 'data' in st.session_state:
                 fig_line = px.line(hourly, x=hourly.index, y=hourly.columns, markers=True, 
                                    labels={'value': 'Count', 'timestamp': 'Hour'},
                                    title=f"Activity by Hour (Split by {split_opt})")
+                st.plotly_chart(fig_line, width='stretch')
+                # Show correlation
+                corr_text = get_correlation_text(hourly)
+                if corr_text:
+                    st.caption(f"📊 Correlation: {corr_text}")
             else:
                 fig_line = px.line(x=hourly.index, y=hourly.values, markers=True, 
                                    labels={'x': 'Hour of Day', 'y': 'Message Count'},
                                    title="Activity by Hour")
-            st.plotly_chart(fig_line, width='stretch')
+                st.plotly_chart(fig_line, width='stretch')
             
+
         st.subheader("Message Volume Over Time")
         show_as_lines = st.checkbox("Show as Lines (Easier Comparison)", value=False)
         plot_func = px.line if show_as_lines else px.area
@@ -356,10 +390,16 @@ if 'data' in st.session_state:
                 fig_time = plot_func(monthly, x=monthly.index, y=monthly.columns, 
                                      title=f"Total Volume (Split by {split_opt_m})",
                                      color_discrete_map=color_map)
+                st.plotly_chart(fig_time, width='stretch')
+                # Show correlation
+                corr_text = get_correlation_text(monthly)
+                if corr_text:
+                    st.caption(f"📊 Correlation: {corr_text}")
             else:
                 fig_time = plot_func(x=monthly.index, y=monthly.values, title="Total Volume")
-            st.plotly_chart(fig_time, width='stretch')
+                st.plotly_chart(fig_time, width='stretch')
             
+
         with col_t2:
             st.write(f"**Top Contacts Volume ({cat_filter})**")
             # Use the already filtered top_talkers_df
@@ -420,6 +460,10 @@ if 'data' in st.session_state:
             fig_disp.update_traces(connectgaps=False)  # Skip gaps instead of connecting
             fig_disp.update_layout(yaxis_range=[0, 100])
             st.plotly_chart(fig_disp, width='stretch')
+            # Show correlation
+            corr_text = get_correlation_text(dispersion)
+            if corr_text:
+                st.caption(f"📊 Correlation: {corr_text}")
 
         else:
             st.info("Not enough data to calculate dispersion.")
