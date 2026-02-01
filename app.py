@@ -372,7 +372,45 @@ if 'data' in st.session_state:
             else:
                 st.info("No contacts match filter.")
         
+        # --- Message Dispersion Over Time ---
+        st.subheader("📊 Message Dispersion Over Time")
+        st.caption("**High dispersion** = Messages spread evenly across many chats. **Low dispersion** = Focused on specific people.")
+        
+        split_opt_disp = st.selectbox("Split Dispersion by:", ["None", "Gender", "Type (Group/Indiv)"], key="dispersion_split")
+        
+        split_arg_disp = None
+        if split_opt_disp == "Gender": split_arg_disp = 'gender'
+        elif split_opt_disp.startswith("Type"): split_arg_disp = 'group'
+        
+        dispersion = analyzer.get_message_dispersion_over_time(split_by=split_arg_disp, exclude_me=exclude_me)
+        
+        if isinstance(dispersion, pd.Series):
+            # Single series (no split)
+            if not dispersion.empty:
+                fig_disp = px.line(x=dispersion.index, y=dispersion.values, markers=True,
+                                   labels={'x': 'Month', 'y': 'Dispersion (%)'},
+                                   title="Message Dispersion Over Time")
+                fig_disp.update_layout(yaxis_range=[0, 100])
+                st.plotly_chart(fig_disp, width='stretch')
+            else:
+                st.info("Not enough data to calculate dispersion.")
+        elif isinstance(dispersion, pd.DataFrame) and not dispersion.empty:
+            # DataFrame with multiple columns (split by gender/group)
+            color_map = None
+            if split_arg_disp == 'gender':
+                color_map = {'male': '#636EFA', 'female': '#EF553B', 'unknown': 'gray'}
+            
+            fig_disp = px.line(dispersion, x=dispersion.index, y=dispersion.columns, markers=True,
+                               labels={'value': 'Dispersion (%)', 'index': 'Month', 'variable': split_opt_disp},
+                               title=f"Message Dispersion Over Time (Split by {split_opt_disp})",
+                               color_discrete_map=color_map)
+            fig_disp.update_layout(yaxis_range=[0, 100])
+            st.plotly_chart(fig_disp, width='stretch')
+        else:
+            st.info("Not enough data to calculate dispersion.")
+        
     with tab2:
+
         st.header("Behavioral Analysis")
         
         # USE FULL ANALYZER (Includes 'Me') for interactions

@@ -200,6 +200,83 @@ class WhatsappAnalyzer:
         df_filtered = self.data[self.data['contact_name'].isin(contact_list)]
         return df_filtered.set_index('timestamp').groupby('contact_name').resample('ME').size().unstack(level=0).fillna(0)
 
+    def get_message_dispersion_over_time(self, split_by=None, exclude_me=False, freq='ME'):
+        """
+        Calculates message dispersion over time using normalized Shannon entropy.
+        
+        Dispersion measures how evenly messages are spread across chats:
+        - 100% = Messages equally distributed across all active chats
+        - 0% = All messages go to a single chat
+        
+        split_by: 'gender', 'group', or None
+        exclude_me: If True, only consider received messages (from_me=0)
+        freq: Resample frequency (default 'ME' = month end)
+        
+        Returns: DataFrame with dispersion percentage per time period
+        """
+        import numpy as np
+        
+        df = self.data.copy()
+        if exclude_me:
+            df = df[df['from_me'] == 0]
+        
+        if df.empty:
+            return pd.DataFrame()
+        
+        def calc_dispersion(group):
+            """Calculate normalized Shannon entropy for a group of messages."""
+            counts = group['chat_name'].value_counts()
+            n = len(counts)
+            if n <= 1:
+                return 0.0  # No dispersion if only one chat
+            
+            # Proportions
+            proportions = counts / counts.sum()
+            
+            # Shannon entropy: -sum(p * log(p))
+            entropy = -np.sum(proportions * np.log(proportions))
+            
+            # Normalize by max entropy (log(n)) to get percentage
+            max_entropy = np.log(n)
+            normalized = (entropy / max_entropy) * 100
+            
+            return normalized
+        
+        # Set timestamp as index for resampling
+        df = df.set_index('timestamp')
+        
+        if split_by is None:
+            # Overall dispersion per period
+            result = df.resample(freq).apply(calc_dispersion)
+            return result
+        
+        elif split_by == 'gender':
+            # Dispersion per gender per period
+            results = {}
+            for gender in ['male', 'female', 'unknown']:
+                gender_df = df[df['gender'] == gender]
+                if not gender_df.empty:
+                    results[gender] = gender_df.resample(freq).apply(calc_dispersion)
+            
+            if not results:
+                return pd.DataFrame()
+            return pd.DataFrame(results).fillna(0)
+        
+        elif split_by == 'group':
+            # Dispersion for groups vs individuals
+            results = {}
+            for is_group, label in [(True, 'Group'), (False, 'Individual')]:
+                type_df = df[df['is_group'] == is_group]
+                if not type_df.empty:
+                    results[label] = type_df.resample(freq).apply(calc_dispersion)
+            
+            if not results:
+                return pd.DataFrame()
+            return pd.DataFrame(results).fillna(0)
+        
+        else:
+            return pd.DataFrame()
+
     def calculate_response_times(self):
         # Sort by chat and time
         df = self.data.sort_values(['jid_row_id', 'timestamp'])
