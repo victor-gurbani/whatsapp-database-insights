@@ -376,13 +376,25 @@ if 'data' in st.session_state:
         st.subheader("📊 Message Dispersion Over Time")
         st.caption("**High dispersion** = Messages spread evenly across many chats. **Low dispersion** = Focused on specific people.")
         
-        split_opt_disp = st.selectbox("Split Dispersion by:", ["None", "Gender", "Type (Group/Indiv)"], key="dispersion_split")
+        disp_col1, disp_col2 = st.columns(2)
+        with disp_col1:
+            split_opt_disp = st.selectbox("Split Dispersion by:", ["None", "Gender", "Type (Group/Indiv)"], key="dispersion_split")
+        with disp_col2:
+            smooth_dispersion = st.checkbox("Smooth (3-month avg)", value=False, key="dispersion_smooth", 
+                                            help="Apply 3-month rolling average to reduce volatility from low-activity months")
         
         split_arg_disp = None
         if split_opt_disp == "Gender": split_arg_disp = 'gender'
         elif split_opt_disp.startswith("Type"): split_arg_disp = 'group'
         
         dispersion = analyzer.get_message_dispersion_over_time(split_by=split_arg_disp, exclude_me=exclude_me)
+        
+        # Apply smoothing if enabled
+        if smooth_dispersion:
+            if isinstance(dispersion, pd.Series):
+                dispersion = dispersion.rolling(window=3, min_periods=1, center=True).mean()
+            elif isinstance(dispersion, pd.DataFrame):
+                dispersion = dispersion.rolling(window=3, min_periods=1, center=True).mean()
         
         if isinstance(dispersion, pd.Series):
             # Single series (no split)
