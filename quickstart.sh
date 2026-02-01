@@ -24,7 +24,8 @@ if [ -n "$TERMUX_VERSION" ]; then
     echo "🤖 Termux environment detected!"
     USE_VENV=false
     echo "📦 Installing required packages via pkg..."
-    pkg install -y python-numpy matplotlib python-pyarrow
+    pkg install -y tur-repo
+    pkg install -y python-numpy matplotlib python-pyarrow python-pandas
 fi
 
 # --- 1. Clone or navigate into the repo ---
