@@ -386,10 +386,11 @@ if 'data' in st.session_state:
         
         if isinstance(dispersion, pd.Series):
             # Single series (no split)
-            if not dispersion.empty:
+            if not dispersion.empty and dispersion.notna().any():
                 fig_disp = px.line(x=dispersion.index, y=dispersion.values, markers=True,
                                    labels={'x': 'Month', 'y': 'Dispersion (%)'},
                                    title="Message Dispersion Over Time")
+                fig_disp.update_traces(connectgaps=False)  # Skip gaps instead of connecting
                 fig_disp.update_layout(yaxis_range=[0, 100])
                 st.plotly_chart(fig_disp, width='stretch')
             else:
@@ -404,8 +405,10 @@ if 'data' in st.session_state:
                                labels={'value': 'Dispersion (%)', 'index': 'Month', 'variable': split_opt_disp},
                                title=f"Message Dispersion Over Time (Split by {split_opt_disp})",
                                color_discrete_map=color_map)
+            fig_disp.update_traces(connectgaps=False)  # Skip gaps instead of connecting
             fig_disp.update_layout(yaxis_range=[0, 100])
             st.plotly_chart(fig_disp, width='stretch')
+
         else:
             st.info("Not enough data to calculate dispersion.")
         

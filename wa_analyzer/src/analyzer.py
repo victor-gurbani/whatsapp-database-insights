@@ -225,10 +225,12 @@ class WhatsappAnalyzer:
         
         def calc_dispersion(group):
             """Calculate normalized Shannon entropy for a group of messages."""
+            if group.empty:
+                return float('nan')  # No data for this period - will create gap in chart
             counts = group['chat_name'].value_counts()
             n = len(counts)
             if n <= 1:
-                return 0.0  # No dispersion if only one chat
+                return float('nan')  # Only one chat - not meaningful dispersion
             
             # Proportions
             proportions = counts / counts.sum()
@@ -260,7 +262,7 @@ class WhatsappAnalyzer:
             
             if not results:
                 return pd.DataFrame()
-            return pd.DataFrame(results).fillna(0)
+            return pd.DataFrame(results)
         
         elif split_by == 'group':
             # Dispersion for groups vs individuals
@@ -272,7 +274,7 @@ class WhatsappAnalyzer:
             
             if not results:
                 return pd.DataFrame()
-            return pd.DataFrame(results).fillna(0)
+            return pd.DataFrame(results)
         
         else:
             return pd.DataFrame()
