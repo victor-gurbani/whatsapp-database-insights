@@ -57,7 +57,7 @@ To use this analyzer, you need to extract your WhatsApp database files from your
 
 ### Extraction Methods
 1. **Root access**: Copy directly from `/data/data/com.whatsapp/databases/`
-2. **Backup decryption**: Use tools like [WhAtsapp-Backup-Downloader-Decryptor](https://github.com/giacomoferretti/whatsapp-backup-downloader-decryptor/issues)
+2. **Backup decryption**: Use tools like [WhatsApp-Backup-Downloader-Decryptor](https://github.com/giacomoferretti/whatsapp-backup-downloader-decryptor/issues)
 3. **ADB backup**: For older Android versions
 
 Place the `.db` files in the project root folder before running the app.
