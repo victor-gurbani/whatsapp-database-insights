@@ -387,7 +387,7 @@ if 'data' in st.session_state:
             
             if split_arg_m:
                 color_map = {'male': '#636EFA', 'female': '#EF553B', 'unknown': 'gray'} if split_arg_m == 'gender' else None
-                fig_time = plot_func(monthly, x=monthly.index, y=monthly.columns, 
+                fig_time = plot_func(monthly, 
                                      title=f"Total Volume (Split by {split_opt_m})",
                                      color_discrete_map=color_map)
                 st.plotly_chart(fig_time, width='stretch')
@@ -406,7 +406,7 @@ if 'data' in st.session_state:
             top_contacts_list = top_talkers_final['contact_name'].head(10).tolist()
             if top_contacts_list:
                 monthly_contacts = analyzer.get_activity_over_time_by_contact(top_contacts_list)
-                fig_contacts = plot_func(monthly_contacts, x=monthly_contacts.index, y=monthly_contacts.columns,
+                fig_contacts = plot_func(monthly_contacts,
                                        title=f"Top 10 Contacts Activity ({cat_filter})")
                 st.plotly_chart(fig_contacts, width='stretch')
             else:

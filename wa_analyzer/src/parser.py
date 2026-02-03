@@ -145,19 +145,15 @@ class WhatsappParser:
             except Exception:
                 return {}
         
-        # Parse vcards from the content string
+        # Parse vcards using vobject
         try:
             for vcard in vobject.readComponents(vcf_content):
                 try:
                     name = vcard.fn.value
-                    # Extract phones
                     if hasattr(vcard, 'tel'):
                         for tel in vcard.tel_list:
                             phone_raw = str(tel.value)
-                            # Normalize: keep strict digits
                             digits = "".join(filter(str.isdigit, phone_raw))
-                            
-                            # Store both full digits and last 9 digits (for matching without country code)
                             if len(digits) > 5:
                                 contacts[digits] = name
                                 if len(digits) > 9:
@@ -165,9 +161,34 @@ class WhatsappParser:
                 except Exception:
                     pass
         except Exception:
-            # If vobject fails entirely, return empty contacts
             pass
             
+        # IMPORTANT: Manual Fallback to catch 'MOBILE' or unlabeled numbers that vobject might skip or malform
+        # Iterate line by line
+        lines = vcf_content.splitlines()
+        current_name = None
+        
+        for line in lines:
+            line = line.strip()
+            if line.startswith("FN:"):
+                current_name = line[3:].strip()
+            elif line.startswith("N:") and not current_name:
+                # Fallback name if FN missing (N:Last;First;...)
+                parts = line[2:].strip().split(';')
+                current_name = " ".join([p for p in parts if p][::-1]).strip() # Simple First Last
+                
+            elif line.startswith("TEL"):
+                # Extract number
+                # Format: TEL;TYPE=CELL:+123456 or TEL:+12345
+                parts = line.split(':')
+                if len(parts) > 1 and current_name:
+                    phone_raw = parts[1]
+                    digits = "".join(filter(str.isdigit, phone_raw))
+                    if len(digits) > 5:
+                        contacts[digits] = current_name
+                        if len(digits) > 9:
+                            contacts[digits[-9:]] = current_name
+
         return contacts
 
     def parse_reactions(self):
