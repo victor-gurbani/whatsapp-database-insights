@@ -4,7 +4,7 @@ A powerful Streamlit-based analyzer for your WhatsApp message database. Get deep
 
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![Streamlit](https://img.shields.io/badge/streamlit-1.0+-FF4B4B.svg)
-![License](https://img.shields.io/badge/license-MIT-green.svg)
+![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)
 
 ## 🚀 Quickstart
 
