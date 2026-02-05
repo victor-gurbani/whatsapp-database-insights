@@ -92,7 +92,7 @@ Place the `.db` files in the project root folder before running the app.
 
 ## 📄 License
 
-MIT License - See [LICENSE](LICENSE) for details.
+Apache 2.0 License - See [LICENSE](LICENSE) for details.
 
 ---
 
