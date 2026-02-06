@@ -26,7 +26,7 @@ wget -qO- https://raw.githubusercontent.com/victor-gurbani/whatsapp-database-ins
 
 ---
 
-## 📋 Manual Setup
+## Manual Setup
 
 If you prefer to set things up manually:
 
@@ -72,7 +72,7 @@ Place the `.db` files in the project root folder before running the app.
 
 ---
 
-## ✨ Features
+## Features
 
 - 📊 **Activity Analytics** - Message volume, hourly patterns, top talkers
 - 🔥 **Behavioral Patterns** - Ghosting stats, reply times, conversation initiators
