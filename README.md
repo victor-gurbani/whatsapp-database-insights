@@ -1,10 +1,12 @@
 # 💬 WhatsApp Database Insights
 
-A powerful Streamlit-based analyzer for your WhatsApp message database. Get deep insights into your chat patterns, behavioral analytics, gender distribution, and more.
+A powerful, **privacy-first** analytics dashboard for your WhatsApp history. 
 
-![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
-![Streamlit](https://img.shields.io/badge/streamlit-1.0+-FF4B4B.svg)
-![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)
+Unlike simple chat viewers, this tool digs deep into the metadata of your `msgstore.db` to uncover behavioral patterns, response latencies, and "Hall of Fame" statistics about your social circle. It runs entirely offline using **Streamlit**.
+
+![Python](https://img.shields.io/badge/Python-3.8%2B-blue)
+![Streamlit](https://img.shields.io/badge/Streamlit-1.0%2B-FF4B4B)
+![License](https://img.shields.io/badge/License-Apache%202.0-green)
 
 ## 🚀 Quickstart
 
