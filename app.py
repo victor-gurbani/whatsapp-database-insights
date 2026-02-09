@@ -951,19 +951,22 @@ if 'data' in st.session_state:
             # Use the FULL SINGLE ANALYZER
             beh_timeline = full_single_analyzer.get_behavioral_timeline(ghost_thresh, init_thresh)
             
-            b1, b2 = st.columns(2)
-            with b1:
-                st.caption("Ghosting Over Time")
-                # Ghosted by Them vs Ghosted by Me
-                fig_g = px.bar(beh_timeline, x=beh_timeline.index, y=['Ghosted by Them', 'Ghosted by Me'], 
-                               title="Ghosting Incidents", barmode='group')
-                st.plotly_chart(fig_g, width='stretch')
-                
-            with b2:
-                st.caption("Initiations Over Time")
-                fig_i = px.bar(beh_timeline, x=beh_timeline.index, y=['Initiated by Me', 'Initiated by Them'], 
-                               title="Conversation Initiations", barmode='group')
-                st.plotly_chart(fig_i, width='stretch')
+            if not beh_timeline.empty:
+                b1, b2 = st.columns(2)
+                with b1:
+                    st.caption("Ghosting Over Time")
+                    # Ghosted by Them vs Ghosted by Me
+                    fig_g = px.bar(beh_timeline, x=beh_timeline.index, y=['Ghosted by Them', 'Ghosted by Me'], 
+                                   title="Ghosting Incidents", barmode='group')
+                    st.plotly_chart(fig_g, width='stretch')
+                    
+                with b2:
+                    st.caption("Initiations Over Time")
+                    fig_i = px.bar(beh_timeline, x=beh_timeline.index, y=['Initiated by Me', 'Initiated by Them'], 
+                                   title="Conversation Initiations", barmode='group')
+                    st.plotly_chart(fig_i, width='stretch')
+            else:
+                st.info("No behavioral timeline data available for this selection.")
 
             st.subheader("Activity Analysis")
             
