@@ -989,11 +989,13 @@ if 'data' in st.session_state:
             elif act_view == "Only Them" and 'Them' in monthly_chat.columns:
                 monthly_chat = monthly_chat[['Them']]
             
-            if isinstance(monthly_chat, pd.DataFrame):
-                fig_chat_time = plot_func_chat(monthly_chat, x=monthly_chat.index, y=monthly_chat.columns, title=f"Message Volume ({act_view})")
+            if monthly_chat.empty:
+                st.info(f"No monthly data available for view: {act_view}")
             else:
-                fig_chat_time = plot_func_chat(x=monthly_chat.index, y=monthly_chat.values, title=f"Message Volume ({act_view})")
-            st.plotly_chart(fig_chat_time, width='stretch')
+                if isinstance(monthly_chat, pd.Series) and not monthly_chat.name:
+                    monthly_chat.name = "Messages"
+                fig_chat_time = plot_func_chat(monthly_chat, title=f"Message Volume ({act_view})")
+                st.plotly_chart(fig_chat_time, width='stretch')
             
             # Hourly Activity
             hourly_split_arg = 'sender' if act_view != "Combined" else None
@@ -1004,11 +1006,14 @@ if 'data' in st.session_state:
                     hourly_chat = hourly_chat[['Me']]
                 elif act_view == "Only Them" and 'Them' in hourly_chat.columns:
                     hourly_chat = hourly_chat[['Them']]
-                fig_chat_hour = px.line(hourly_chat, x=hourly_chat.index, y=hourly_chat.columns, markers=True, title=f"Hourly Activity ({act_view})")
+            
+            if hourly_chat.empty:
+                st.info(f"No hourly data available for view: {act_view}")
             else:
-                fig_chat_hour = px.line(x=hourly_chat.index, y=hourly_chat.values, markers=True, title=f"Hourly Activity ({act_view})")
-                
-            st.plotly_chart(fig_chat_hour, width='stretch')
+                if isinstance(hourly_chat, pd.Series) and not hourly_chat.name:
+                    hourly_chat.name = "Messages"
+                fig_chat_hour = px.line(hourly_chat, markers=True, title=f"Hourly Activity ({act_view})")
+                st.plotly_chart(fig_chat_hour, width='stretch')
 
             st.subheader("Word Usage Comparison")
             if st.button("Generate Comparative Word Clouds"):
