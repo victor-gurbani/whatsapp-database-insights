@@ -237,6 +237,22 @@ def load_jid_raw_lookup(msgstore_path):
         for r in df_jid.itertuples(index=False)
     }
 
+
+@st.cache_data(show_spinner=False)
+def load_vcf_contact_lookup(vcf_path):
+    """
+    Load VCF contact map using parser's VCF logic.
+    Returns dict: normalized digits -> display name.
+    """
+    if not vcf_path or not os.path.exists(vcf_path):
+        return {}
+    try:
+        parser = WhatsappParser("", "", vcf_path)
+        contacts = parser.parse_vcf()
+        return contacts if isinstance(contacts, dict) else {}
+    except Exception:
+        return {}
+
 # Sidebar
 st.sidebar.header("Data Sources")
 
@@ -1237,6 +1253,7 @@ if 'data' in st.session_state:
             groups_df = groups_df[groups_df['chat_name'].notnull()]
             lid_to_pn_map = load_lid_jid_map(msgstore_path)
             jid_raw_lookup = load_jid_raw_lookup(msgstore_path)
+            vcf_contact_lookup = load_vcf_contact_lookup(vcf_path)
             lids_by_pn = {}
             for lid_id, pn_id in lid_to_pn_map.items():
                 lids_by_pn.setdefault(pn_id, []).append(lid_id)
@@ -1324,7 +1341,14 @@ if 'data' in st.session_state:
 
                             pn_raw = jid_raw_lookup.get(cid, '')
                             if pn_raw:
-                                preferred_labels[cid] = pn_raw.split('@')[0]
+                                phone_part = str(pn_raw).split('@')[0]
+                                digits = "".join(filter(str.isdigit, phone_part))
+                                if digits in vcf_contact_lookup:
+                                    preferred_labels[cid] = vcf_contact_lookup[digits]
+                                elif len(digits) > 9 and digits[-9:] in vcf_contact_lookup:
+                                    preferred_labels[cid] = vcf_contact_lookup[digits[-9:]]
+                                else:
+                                    preferred_labels[cid] = phone_part
 
                         gdf['sender_label'] = gdf['canonical_sender_id'].map(preferred_labels)
                         gdf.loc[gdf['from_me'] == 1, 'sender_label'] = 'You'
