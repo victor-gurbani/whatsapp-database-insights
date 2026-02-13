@@ -208,6 +208,35 @@ def load_lid_jid_map(msgstore_path):
     df_map = df_map.sort_values('sort_id').drop_duplicates(subset=['lid_row_id'], keep='last')
     return {int(r.lid_row_id): int(r.jid_row_id) for r in df_map.itertuples(index=False)}
 
+
+@st.cache_data(show_spinner=False)
+def load_jid_raw_lookup(msgstore_path):
+    """
+    Load jid row-id -> raw_string for fallback labeling.
+    """
+    if not msgstore_path or not os.path.exists(msgstore_path):
+        return {}
+
+    conn = None
+    try:
+        conn = sqlite3.connect(msgstore_path)
+        df_jid = pd.read_sql_query("SELECT _id AS jid_id, raw_string FROM jid", conn)
+    except Exception:
+        return {}
+    finally:
+        if conn is not None:
+            conn.close()
+
+    if df_jid.empty:
+        return {}
+
+    df_jid['jid_id'] = pd.to_numeric(df_jid['jid_id'], errors='coerce')
+    df_jid = df_jid.dropna(subset=['jid_id'])
+    return {
+        int(r.jid_id): (str(r.raw_string) if pd.notna(r.raw_string) else '')
+        for r in df_jid.itertuples(index=False)
+    }
+
 # Sidebar
 st.sidebar.header("Data Sources")
 
@@ -1207,6 +1236,10 @@ if 'data' in st.session_state:
             groups_df = df_group_base[df_group_base['is_group'] == True].copy()
             groups_df = groups_df[groups_df['chat_name'].notnull()]
             lid_to_pn_map = load_lid_jid_map(msgstore_path)
+            jid_raw_lookup = load_jid_raw_lookup(msgstore_path)
+            lids_by_pn = {}
+            for lid_id, pn_id in lid_to_pn_map.items():
+                lids_by_pn.setdefault(pn_id, []).append(lid_id)
 
             if groups_df.empty:
                 st.info("No groups found with current filters.")
@@ -1261,6 +1294,38 @@ if 'data' in st.session_state:
                             .to_dict()
                         )
 
+                        # Improve unresolved labels:
+                        # 1) try global non-numeric name evidence across dataset for mapped ids
+                        # 2) fallback to mapped phone JID user part
+                        canonical_ids = [int(x) for x in gdf['canonical_sender_id'].dropna().unique() if int(x) != -1]
+                        for cid in canonical_ids:
+                            current = str(preferred_labels.get(cid, '') or '').strip()
+                            needs_improve = (not current) or (current.lower() in {'unknown', 'none', 'nan'}) or current.isdigit()
+                            if not needs_improve:
+                                continue
+
+                            related_ids = [cid] + lids_by_pn.get(cid, [])
+                            global_rows = df_group_base[
+                                (df_group_base['from_me'] == 0) &
+                                (pd.to_numeric(df_group_base['sender_jid_row_id'], errors='coerce').isin(related_ids))
+                            ].copy()
+
+                            if not global_rows.empty:
+                                cand = global_rows['contact_name'].fillna('').astype(str).str.strip()
+                                cand = cand[
+                                    cand.ne('') &
+                                    (~cand.str.lower().isin(['unknown', 'none', 'nan'])) &
+                                    (cand.str.contains(r'[A-Za-zÀ-ÿ]', regex=True))
+                                ]
+                                if not cand.empty:
+                                    best = cand.value_counts().index[0]
+                                    preferred_labels[cid] = best
+                                    continue
+
+                            pn_raw = jid_raw_lookup.get(cid, '')
+                            if pn_raw:
+                                preferred_labels[cid] = pn_raw.split('@')[0]
+
                         gdf['sender_label'] = gdf['canonical_sender_id'].map(preferred_labels)
                         gdf.loc[gdf['from_me'] == 1, 'sender_label'] = 'You'
                         missing_label = gdf['sender_label'].isna()
@@ -1270,6 +1335,8 @@ if 'data' in st.session_state:
                             .fillna('Unknown')
                             .astype(str)
                         )
+                        gdf['sender_label'] = gdf['sender_label'].str.replace(r'@lid$', '', regex=True)
+                        gdf['sender_label'] = gdf['sender_label'].str.replace(r'@s\\.whatsapp\\.net$', '', regex=True)
                         gdf['sender_label'] = gdf['sender_label'].astype(str)
                         gdf['word_count'] = gdf['text_data'].fillna('').astype(str).str.split().str.len()
 
@@ -1390,6 +1457,7 @@ if 'data' in st.session_state:
                             'Read Events': 0
                         })
                         rankings = rankings.sort_values('Messages', ascending=False)
+                        rankings.index = rankings.index.map(str)
                         rankings.index.name = 'sender_label'
 
                         unresolved_ids = [m for m in rankings.index.tolist() if str(m).isdigit()]
@@ -1483,7 +1551,8 @@ if 'data' in st.session_state:
                                     title="Lowest Avg Reply Delay",
                                     labels={'sender_label': 'Member'}
                                 )
-                                fig_rep_fast.update_layout(yaxis={'categoryorder': 'total descending'})
+                                rep_order = rep_rank.index.map(str).tolist()[::-1]
+                                fig_rep_fast.update_layout(yaxis={'type': 'category', 'categoryorder': 'array', 'categoryarray': rep_order})
                                 st.plotly_chart(fig_rep_fast, width='stretch')
                             else:
                                 st.caption("Not enough reply events.")
@@ -1500,7 +1569,8 @@ if 'data' in st.session_state:
                                     title="Lowest Avg Read Delay (Per Member)",
                                     labels={'sender_label': 'Member'}
                                 )
-                                fig_read_fast.update_layout(yaxis={'categoryorder': 'total descending'})
+                                read_order = read_rank.index.map(str).tolist()[::-1]
+                                fig_read_fast.update_layout(yaxis={'type': 'category', 'categoryorder': 'array', 'categoryarray': read_order})
                                 st.plotly_chart(fig_read_fast, width='stretch')
                             else:
                                 st.caption("No per-member read receipts found for this group.")
@@ -1551,6 +1621,7 @@ if 'data' in st.session_state:
                                         .size()
                                         .reset_index(name='count')
                                     )
+                                    dist_counts['sender_label'] = dist_counts['sender_label'].astype(str)
                                     fig_dist = px.bar(
                                         dist_counts,
                                         x='sender_label',
@@ -1560,6 +1631,7 @@ if 'data' in st.session_state:
                                         title="Reply Delay Buckets by Member",
                                         labels={'sender_label': 'Member', 'count': 'Replies', 'bucket': 'Delay Bucket'}
                                     )
+                                    fig_dist.update_layout(xaxis={'type': 'category'})
                                     st.plotly_chart(fig_dist, width='stretch')
 
                                     summary = (
