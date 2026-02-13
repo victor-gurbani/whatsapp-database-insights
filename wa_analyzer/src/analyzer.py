@@ -1221,23 +1221,81 @@ class WhatsappAnalyzer:
         """
         Analyze @mentions.
         """
-        if 'mentions_list' not in self.data.columns: return None
+        if 'mentions_list' not in self.data.columns and 'mentions_pairs' not in self.data.columns:
+            return None
         
         df = self.data
         if exclude_groups: df = df[~df['is_group']]
-        
-        if 'sender_jid_row_id' not in df.columns: return None
-             
-        jid_map = df[['sender_jid_row_id', 'contact_name']].dropna().drop_duplicates('sender_jid_row_id').set_index('sender_jid_row_id')['contact_name']
-        
-        df_mentions = df[['contact_name', 'from_me', 'mentions_list']].dropna(subset=['mentions_list']).copy()
-        df_exploded = df_mentions.explode('mentions_list') 
-        df_exploded['mentioned_name'] = df_exploded['mentions_list'].map(jid_map)
+
+        if df.empty:
+            return None
+
+        # Preferred path: parser provides explicit (mentioned_jid_row_id, mentioned_name) tuples.
+        if 'mentions_pairs' in df.columns:
+            df_mentions = df[['contact_name', 'from_me', 'mentions_pairs']].dropna(subset=['mentions_pairs']).copy()
+            if df_mentions.empty:
+                return None
+
+            df_exploded = df_mentions.explode('mentions_pairs')
+            df_exploded['mentioned_jid_row_id'] = df_exploded['mentions_pairs'].apply(
+                lambda p: p[0] if isinstance(p, (list, tuple)) and len(p) >= 2 else pd.NA
+            )
+            df_exploded['mentioned_name'] = df_exploded['mentions_pairs'].apply(
+                lambda p: p[1] if isinstance(p, (list, tuple)) and len(p) >= 2 else pd.NA
+            )
+        else:
+            # Fallback path: use IDs only and infer names from available sender/chat mappings.
+            if 'mentions_list' not in df.columns:
+                return None
+
+            df_mentions = df[['contact_name', 'from_me', 'mentions_list']].dropna(subset=['mentions_list']).copy()
+            if df_mentions.empty:
+                return None
+
+            df_exploded = df_mentions.explode('mentions_list')
+            df_exploded['mentioned_jid_row_id'] = df_exploded['mentions_list']
+
+            sender_map = pd.Series(dtype='object')
+            if 'sender_jid_row_id' in df.columns:
+                sender_map = (
+                    df[['sender_jid_row_id', 'contact_name']]
+                    .dropna()
+                    .drop_duplicates('sender_jid_row_id')
+                    .set_index('sender_jid_row_id')['contact_name']
+                )
+
+            direct_map = pd.Series(dtype='object')
+            if 'jid_row_id' in df.columns and 'chat_name' in df.columns:
+                direct_map = (
+                    df[df['is_group'] == False][['jid_row_id', 'chat_name']]
+                    .dropna()
+                    .drop_duplicates('jid_row_id')
+                    .set_index('jid_row_id')['chat_name']
+                )
+
+            jid_map = sender_map.combine_first(direct_map)
+            df_exploded['mentioned_name'] = df_exploded['mentioned_jid_row_id'].map(jid_map)
+
         df_exploded = df_exploded.dropna(subset=['mentioned_name'])
-        
+        if df_exploded.empty:
+            return None
+
         i_mention = df_exploded[df_exploded['from_me'] == 1]['mentioned_name'].value_counts().head(top_n)
-        mentions_of_me = df_exploded[df_exploded['mentioned_name'] == 'You']['contact_name'].value_counts().head(top_n)
-        
+
+        # Detect mentions of "me" by ID (preferred) and by common aliases.
+        me_aliases = {'You', 'Me', 'Myself'}
+        my_jid_ids = set()
+        if 'sender_jid_row_id' in df.columns:
+            my_ids = pd.to_numeric(df.loc[df['from_me'] == 1, 'sender_jid_row_id'], errors='coerce').dropna()
+            my_jid_ids = {int(x) for x in my_ids if int(x) > 0}
+
+        me_mask = df_exploded['mentioned_name'].isin(me_aliases)
+        if my_jid_ids:
+            mentioned_ids = pd.to_numeric(df_exploded['mentioned_jid_row_id'], errors='coerce')
+            me_mask = me_mask | mentioned_ids.isin(my_jid_ids)
+
+        mentions_of_me = df_exploded[me_mask]['contact_name'].value_counts().head(top_n)
+
         return {'i_mention': i_mention, 'who_mentions_me': mentions_of_me}
 
     def get_historical_stats(self, exclude_groups=False):
@@ -1247,8 +1305,13 @@ class WhatsappAnalyzer:
         df = self.data.sort_values('timestamp').copy()
         if exclude_groups: df = df[~df['is_group']]
         
-        # 1. First Message (Use Chat Name to capture start of convo)
-        first_msgs = df.groupby('chat_name').first()[['timestamp', 'text_data']]
+        # 1. First Message (preserve values from the same physical row).
+        # groupby().first() is per-column non-null and can mix values from different rows.
+        first_msgs = (
+            df.sort_values('timestamp')
+            .drop_duplicates(subset=['chat_name'], keep='first')
+            .set_index('chat_name')[['timestamp', 'text_data']]
+        )
         first_msgs = first_msgs.sort_values('timestamp')
         
         # 2. Velocity

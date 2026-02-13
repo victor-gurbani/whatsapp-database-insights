@@ -242,15 +242,31 @@ class WhatsappParser:
         """
         try:
             df = pd.read_sql_query(query, self.conn_msg)
-            # Take max timestamp per message (if multiple recipients, this is tricky, 
-            # but for 1-1 it's fine. For groups, it implies 'someone' read it).
-            # For accurate 1-1 analysis, we assume 1 row per msg usually? 
-            # Actually receipts table has one row per recipient per msg.
-            # We'll group by message_id and take max read (latest read)
-            # or min read (first read). For ghosting, "First Read" is probably better.
-            
-            # Use min > 0 to find when it was *first* read
-            return df
+            if df.empty:
+                return df
+
+            # Normalize to numeric first.
+            df['read_timestamp'] = pd.to_numeric(df['read_timestamp'], errors='coerce')
+            df['played_timestamp'] = pd.to_numeric(df['played_timestamp'], errors='coerce')
+
+            # Keep only meaningful positive values.
+            df['read_timestamp'] = df['read_timestamp'].where(df['read_timestamp'] > 0)
+            df['played_timestamp'] = df['played_timestamp'].where(df['played_timestamp'] > 0)
+
+            # Use read timestamp primarily, fallback to played timestamp when needed.
+            # Then take the earliest event per message (first meaningful read/played).
+            df['effective_read_timestamp'] = df['read_timestamp'].fillna(df['played_timestamp'])
+            df = df[df['effective_read_timestamp'].notna()]
+
+            if df.empty:
+                return pd.DataFrame(columns=['message_row_id', 'read_timestamp'])
+
+            first_receipt = (
+                df.groupby('message_row_id', as_index=False)['effective_read_timestamp']
+                .min()
+                .rename(columns={'effective_read_timestamp': 'read_timestamp'})
+            )
+            return first_receipt
         except Exception as e:
             print(f"Error parsing receipts: {e}")
             return pd.DataFrame()
@@ -289,12 +305,22 @@ class WhatsappParser:
         # receipts_df has message_row_id (from _id or key_id join). 
         # But wait, parse_receipts (Step 1610) selects m._id as message_row_id.
         if not receipts_df.empty:
-            # Take latest read time if duplicates
-            receipts_dedup = receipts_df.sort_values('read_timestamp').groupby('message_row_id').last().reset_index()
-            messages_df = pd.merge(messages_df, receipts_dedup[['message_row_id', 'read_timestamp']], left_on='message_row_id', right_on='message_row_id', how='left')
+            # parse_receipts already returns one row per message using the earliest
+            # meaningful read/played timestamp.
+            messages_df = pd.merge(messages_df, receipts_df[['message_row_id', 'read_timestamp']], left_on='message_row_id', right_on='message_row_id', how='left')
             messages_df.rename(columns={'read_timestamp': 'read_at'}, inplace=True)
         else:
             messages_df['read_at'] = pd.NaT
+
+        # Normalize receipt-derived read_at (numeric unix ms) before fallback fills.
+        if 'read_at' in messages_df.columns and not pd.api.types.is_datetime64_any_dtype(messages_df['read_at']):
+            read_at_numeric = pd.to_numeric(messages_df['read_at'], errors='coerce')
+            mask_invalid = read_at_numeric.isna() | (read_at_numeric <= 0)
+            messages_df['read_at'] = pd.to_datetime(
+                read_at_numeric.where(~mask_invalid),
+                unit='ms',
+                errors='coerce'
+            )
 
         # Fallback: Use receipt_server_timestamp if read_at is missing
         if 'receipt_server_timestamp' in messages_df.columns:
@@ -472,8 +498,38 @@ class WhatsappParser:
         # 10. Merge Mentions
         mentions = self.parse_mentions()
         if not mentions.empty:
-             # Count mentions per message? Or list of mentioned JIDs?
-             mentions_agg = mentions.groupby('message_row_id')['mentioned_jid_row_id'].apply(list).reset_index(name='mentions_list')
+             # Resolve mentioned JID IDs to names using the same contact resolver.
+             mention_jids = jids_df.rename(
+                 columns={
+                     'jid_row_id': 'mentioned_jid_row_id',
+                     'raw_string': 'mentioned_raw_string',
+                     'user': 'mentioned_user'
+                 }
+             )
+             mentions = pd.merge(mentions, mention_jids, on='mentioned_jid_row_id', how='left')
+             mentions['mentioned_name'] = mentions.apply(
+                 lambda x: get_name_from_id(x.get('mentioned_raw_string'), x.get('mentioned_user'), subject=None),
+                 axis=1
+             )
+
+             mentions_ids = (
+                 mentions.groupby('message_row_id')['mentioned_jid_row_id']
+                 .apply(list)
+                 .reset_index(name='mentions_list')
+             )
+             mentions_names = (
+                 mentions.groupby('message_row_id')['mentioned_name']
+                 .apply(list)
+                 .reset_index(name='mentions_name_list')
+             )
+             mentions_pairs = (
+                 mentions.groupby('message_row_id')
+                 .apply(lambda x: list(zip(x['mentioned_jid_row_id'], x['mentioned_name'])))
+                 .reset_index(name='mentions_pairs')
+             )
+
+             mentions_agg = mentions_ids.merge(mentions_names, on='message_row_id', how='left')
+             mentions_agg = mentions_agg.merge(mentions_pairs, on='message_row_id', how='left')
              merged = pd.merge(merged, mentions_agg, on='message_row_id', how='left')
              
         # 11. Merge Quotes (to identify "Deep Replies")
@@ -497,4 +553,3 @@ class WhatsappParser:
         try:
             return pd.read_sql_query(query, self.conn_msg)
         except: return pd.DataFrame()
-

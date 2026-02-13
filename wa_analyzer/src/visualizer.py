@@ -13,8 +13,30 @@ class ReportGenerator:
         sns.set_theme(style="whitegrid")
 
     def plot_top_talkers(self, top_talkers):
+        if top_talkers is None:
+            return
+
+        # Accept either:
+        # - Series indexed by contact
+        # - DataFrame with contact/count columns (current analyzer output)
+        if hasattr(top_talkers, "reset_index") and not hasattr(top_talkers, "columns"):
+            plot_df = top_talkers.reset_index()
+            plot_df.columns = ["contact_name", "count"]
+        elif hasattr(top_talkers, "columns"):
+            plot_df = top_talkers.copy()
+            if "contact_name" not in plot_df.columns and "chat_name" in plot_df.columns:
+                plot_df = plot_df.rename(columns={"chat_name": "contact_name"})
+            if "count" not in plot_df.columns:
+                return
+            plot_df = plot_df[["contact_name", "count"]]
+        else:
+            return
+
+        if plot_df.empty:
+            return
+
         plt.figure(figsize=(10, 6))
-        sns.barplot(x=top_talkers.values, y=top_talkers.index, hue=top_talkers.index, palette="viridis", legend=False)
+        sns.barplot(data=plot_df, x="count", y="contact_name", palette="viridis", hue="contact_name", legend=False)
         plt.title("Top 10 Most Active Contacts")
         plt.xlabel("Number of Messages")
         plt.tight_layout()
