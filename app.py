@@ -233,61 +233,90 @@ def render_contact_race_video(
     day_top_max = np.partition(values, -top_k, axis=1)[:, -top_k:].max(axis=1)
     global_max = max(float(day_top_max.max()), 1.0)
 
+    # Drive animation by elapsed calendar time, so FPS changes smoothness only (not speed).
+    elapsed_days = (
+        (data.index - data.index[0]).total_seconds() / (24 * 60 * 60)
+    ).to_numpy(dtype=float)
+    total_elapsed_days = float(elapsed_days[-1]) if n_steps > 1 else 0.0
+    days_per_second = 30.4375 / max(seconds_per_month, 1e-9)
+    duration_seconds = total_elapsed_days / max(days_per_second, 1e-9)
+    min_duration_seconds = 8.0
+    hold_tail_seconds = 0.8
+    base_duration_seconds = max(duration_seconds, min_duration_seconds)
+    total_frames = max(1, int(np.ceil((base_duration_seconds + hold_tail_seconds) * fps)) + 1)
+
     if n_steps > 1:
-        deltas_days = np.diff(data.index.view('int64')) / (24 * 60 * 60 * 1e9)
-        positive = deltas_days[deltas_days > 0]
+        step_days_arr = np.diff(elapsed_days)
+        positive = step_days_arr[step_days_arr > 0]
         step_days = float(np.median(positive)) if positive.size else 1.0
     else:
         step_days = 1.0
 
-    # Required pacing: ~1 month every 2 seconds at 15 fps.
-    days_per_frame = 30.4375 / (fps * seconds_per_month)
-    steps_per_frame = days_per_frame / max(step_days, 1e-9)
-    total_frames = max(1, int(np.ceil((max(n_steps - 1, 0)) / max(steps_per_frame, 1e-9))) + 1)
-    timeline = np.linspace(0.0, max(n_steps - 1, 0), total_frames)
-
     color_lookup = build_distinct_color_map(names)
+    resolution_scale = float(np.clip(np.sqrt((width * height) / (1280 * 720)), 0.9, 1.8))
+    frame_dt = 1.0 / max(fps, 1e-9)
+    smoothing_tau_seconds = 0.35
+    smooth_alpha = 1.0 - np.exp(-frame_dt / max(smoothing_tau_seconds, 1e-9))
 
     fig, ax = plt.subplots(figsize=(width / 100, height / 100), dpi=100)
     fig.patch.set_facecolor('#05070f')
+    motion_state = {'vals': None, 'pos': None, 'xmax': None}
 
     def style_axes(x_lim):
         ax.set_facecolor('#0b1220')
         for spine in ax.spines.values():
             spine.set_visible(False)
-        ax.grid(axis='x', color='#334155', alpha=0.32, linewidth=1)
-        ax.tick_params(axis='x', colors='#94a3b8', labelsize=10)
+        ax.grid(axis='x', color='#334155', alpha=0.32, linewidth=max(1.0, 1.0 * resolution_scale))
+        ax.tick_params(axis='x', colors='#94a3b8', labelsize=10 * resolution_scale)
         ax.tick_params(axis='y', length=0)
         ax.xaxis.set_major_formatter(mticker.StrMethodFormatter('{x:,.0f}'))
         ax.set_xlim(0, max(x_lim, 1))
         ax.set_ylim(top_k - 0.35, -0.65)
         ax.set_yticks([])
-        ax.set_xlabel("Messages in rolling 3-month window", color='#cbd5e1', fontsize=11)
+        ax.set_xlabel("Messages in rolling 3-month window", color='#cbd5e1', fontsize=11 * resolution_scale)
 
     def draw_frame(frame_idx):
-        t = float(timeline[frame_idx])
-        i0 = int(np.floor(t))
-        i1 = min(i0 + 1, n_steps - 1)
-        eased = ease_in_out_cubic(t - i0)
+        elapsed_seconds = min(frame_idx / max(fps, 1e-9), base_duration_seconds)
+        elapsed = min(elapsed_seconds * days_per_second, total_elapsed_days)
+        if n_steps <= 1:
+            i0 = i1 = 0
+            eased = 0.0
+        else:
+            i1 = int(np.searchsorted(elapsed_days, elapsed, side='right'))
+            i1 = min(max(i1, 1), n_steps - 1)
+            i0 = i1 - 1
+            span = max(elapsed_days[i1] - elapsed_days[i0], 1e-9)
+            raw_alpha = (elapsed - elapsed_days[i0]) / span
+            eased = ease_in_out_cubic(raw_alpha)
 
         frame_values = values[i0] * (1.0 - eased) + values[i1] * eased
         frame_pos = ranks[i0] * (1.0 - eased) + ranks[i1] * eased
+        if motion_state['vals'] is None:
+            motion_state['vals'] = frame_values.copy()
+            motion_state['pos'] = frame_pos.copy()
+        else:
+            motion_state['vals'] = motion_state['vals'] + smooth_alpha * (frame_values - motion_state['vals'])
+            motion_state['pos'] = motion_state['pos'] + smooth_alpha * (frame_pos - motion_state['pos'])
 
         # Show only the leaders plus a few near-threshold bars to make entries smoother.
         keep_n = min(top_k + 3, n_contacts)
-        visible = np.argsort(frame_pos)[:keep_n]
-        visible = visible[np.argsort(frame_pos[visible])]
+        visible = np.argsort(motion_state['pos'])[:keep_n]
+        visible = visible[np.argsort(motion_state['pos'][visible])]
         draw_ids = visible[:top_k]
 
-        bar_vals = frame_values[draw_ids]
-        bar_pos = frame_pos[draw_ids]
+        bar_vals = motion_state['vals'][draw_ids]
+        bar_pos = motion_state['pos'][draw_ids]
         bar_names = names[draw_ids]
 
         day_max = day_top_max[i0] * (1.0 - eased) + day_top_max[i1] * eased
         x_max = max(day_max * 1.18, global_max * 0.2, 1.0)
+        if motion_state['xmax'] is None:
+            motion_state['xmax'] = x_max
+        else:
+            motion_state['xmax'] = motion_state['xmax'] + smooth_alpha * (x_max - motion_state['xmax'])
 
         ax.cla()
-        style_axes(x_max)
+        style_axes(motion_state['xmax'])
 
         ax.barh(
             bar_pos,
@@ -307,11 +336,11 @@ def render_contact_race_video(
                 va='center',
                 ha='left',
                 color='white',
-                fontsize=10,
+                fontsize=10 * resolution_scale,
                 fontweight='bold'
             )
 
-        current_day = data.index[i0] + pd.to_timedelta((t - i0) * step_days, unit='D')
+        current_day = data.index[0] + pd.to_timedelta(elapsed, unit='D')
         window_start = current_day - pd.DateOffset(months=3)
         range_fmt = '%b %d, %Y' if step_days >= 1 else '%b %d, %Y %H:%M'
 
@@ -323,18 +352,18 @@ def render_contact_race_video(
             ha='left',
             va='bottom',
             color='white',
-            fontsize=17,
+            fontsize=17 * resolution_scale,
             fontweight='bold'
         )
         ax.text(
             0.01,
             1.00,
-            current_day.strftime('%b %d, %Y'),
+            current_day.strftime('%b %d, %Y %H:%M' if step_days < 1 else '%b %d, %Y'),
             transform=ax.transAxes,
             ha='left',
             va='top',
             color='#22d3ee',
-            fontsize=13,
+            fontsize=13 * resolution_scale,
             fontweight='bold'
         )
         ax.text(
@@ -345,8 +374,8 @@ def render_contact_race_video(
             ha='right',
             va='top',
             color='#e2e8f0',
-            fontsize=10,
-            bbox=dict(facecolor='#0f172a', edgecolor='none', alpha=0.82, boxstyle='round,pad=0.32')
+            fontsize=10 * resolution_scale,
+            bbox=dict(facecolor='#0f172a', edgecolor='none', alpha=0.82, boxstyle=f'round,pad={0.32 * resolution_scale:.2f}')
         )
         ax.text(
             0.99,
@@ -356,7 +385,7 @@ def render_contact_race_video(
             ha='right',
             va='top',
             color='#94a3b8',
-            fontsize=9
+            fontsize=9 * resolution_scale
         )
 
     anim = animation.FuncAnimation(
@@ -1037,18 +1066,33 @@ if 'data' in st.session_state:
         st.divider()
         st.subheader("🎬 3-Month Rolling Contact Race Video")
         st.caption(
-            "Dynamic top-10 bar chart race using day-by-day counts in a rolling 3-month window. "
-            "Rendered at 15 fps with smooth nonlinear overtaking (1 month ≈ 2 seconds)."
+            "Dynamic top-10 bar chart race in a rolling 3-month window with smooth nonlinear overtaking. "
+            "Pacing is fixed to 1 month ≈ 2 seconds."
         )
 
         race_c1, race_c2, race_c3 = st.columns(3)
-        include_me_race = race_c1.checkbox(
-            "Include my own messages",
+        race_60fps = race_c1.checkbox(
+            "60 FPS high precision",
             value=False,
-            key="race_include_me",
-            help="Off by default to focus on contact-vs-contact dynamics."
+            key="race_60fps",
+            help="Uses 60 fps + 6-hour sampling for smoother overtakes at the same overall speed."
         )
-        candidate_pool = race_c2.slider(
+        include_chat_sum = race_c2.checkbox(
+            "Include my msgs in each chat total",
+            value=False,
+            key="race_include_chat_sum",
+            help="Off: only their incoming messages. On: each person's total = their messages + mine in that chat."
+        )
+        average_my_msgs = race_c3.checkbox(
+            "Average my msgs by people spoken",
+            value=False,
+            key="race_average_my_msgs",
+            disabled=not include_chat_sum,
+            help="When enabled, my outgoing messages are weighted by 1 / people I spoke with that day."
+        )
+
+        race_c4, race_c5 = st.columns(2)
+        candidate_pool = race_c4.slider(
             "Candidate contact pool",
             min_value=20,
             max_value=300,
@@ -1057,19 +1101,33 @@ if 'data' in st.session_state:
             key="race_candidate_pool",
             help="Larger pools capture more late overtakes but render slower."
         )
-        quality = race_c3.selectbox(
+        quality = race_c5.selectbox(
             "Video quality",
             ["Preview (960x540)", "HD (1280x720)", "Full HD (1920x1080)"],
             index=1,
             key="race_video_quality"
         )
+        seconds_per_month = st.slider(
+            "Seconds per month",
+            min_value=2.0,
+            max_value=10.0,
+            value=4.0,
+            step=0.5,
+            key="race_seconds_per_month",
+            help="Higher values slow down the race. 4.0 is smoother and easier to read than 2.0."
+        )
 
         if st.button("Generate Bar Chart Race Video", key="race_video_generate"):
             with st.spinner("Rendering race video... this may take a while on large date ranges."):
+                fps_value = 60 if race_60fps else 15
+                bucket_freq = '6h' if race_60fps else 'D'
+                count_mode = 'chat_total' if include_chat_sum else 'their_only'
                 rolling_counts = build_three_month_rolling_counts(
                     df_base,
-                    include_me=include_me_race,
-                    top_candidates=candidate_pool
+                    count_mode=count_mode,
+                    average_my_messages=(average_my_msgs and include_chat_sum),
+                    top_candidates=candidate_pool,
+                    time_bin=bucket_freq
                 )
 
                 if rolling_counts.empty:
@@ -1085,20 +1143,29 @@ if 'data' in st.session_state:
                     payload = render_contact_race_video(
                         rolling_counts=rolling_counts,
                         top_k=10,
-                        fps=15,
-                        seconds_per_month=2.0,
+                        fps=fps_value,
+                        seconds_per_month=seconds_per_month,
                         width=width,
                         height=height
                     )
                     months_span = max(
-                        (rolling_counts.index.max() - rolling_counts.index.min()).days / 30.4375,
+                        (rolling_counts.index.max() - rolling_counts.index.min()).total_seconds() / (86400 * 30.4375),
                         0
                     )
-                    payload['date_start'] = rolling_counts.index.min().strftime('%Y-%m-%d')
-                    payload['date_end'] = rolling_counts.index.max().strftime('%Y-%m-%d')
+                    date_fmt = '%Y-%m-%d %H:%M' if bucket_freq != 'D' else '%Y-%m-%d'
+                    payload['date_start'] = rolling_counts.index.min().strftime(date_fmt)
+                    payload['date_end'] = rolling_counts.index.max().strftime(date_fmt)
                     payload['contacts_count'] = int(rolling_counts.shape[1])
-                    payload['approx_seconds'] = months_span * 2.0
+                    payload['seconds_per_month'] = float(seconds_per_month)
+                    payload['approx_seconds'] = max(months_span * float(seconds_per_month), 8.0) + 0.8
                     payload['quality'] = quality
+                    payload['fps'] = fps_value
+                    payload['bucket_freq'] = bucket_freq
+                    payload['precision_label'] = "6h sampling + time interpolation" if race_60fps else "Standard daily steps"
+                    payload['count_mode_label'] = (
+                        "Their messages only" if count_mode == 'their_only' else "Chat total (theirs + mine)"
+                    )
+                    payload['avg_my_msgs'] = bool(average_my_msgs and include_chat_sum)
                     st.session_state['race_video_payload'] = payload
 
         race_payload = st.session_state.get('race_video_payload')
@@ -1120,6 +1187,10 @@ if 'data' in st.session_state:
             st.caption(
                 f"Data range: {race_payload.get('date_start')} to {race_payload.get('date_end')} • "
                 f"Contacts considered: {race_payload.get('contacts_count', 0)} • "
+                f"Mode: {race_payload.get('count_mode_label')} • "
+                f"FPS: {race_payload.get('fps', 15)} ({race_payload.get('precision_label', 'Standard')}) • "
+                f"Speed: 1 month ≈ {race_payload.get('seconds_per_month', 4.0):.1f}s • "
+                f"Avg my msgs: {'On' if race_payload.get('avg_my_msgs') else 'Off'} • "
                 f"Frames: {race_payload.get('frame_count', 0):,} • "
                 f"Approx length: {race_payload.get('approx_seconds', 0):.1f}s"
             )
