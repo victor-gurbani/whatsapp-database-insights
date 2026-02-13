@@ -23,6 +23,84 @@ st.title("💬 WhatsApp Interactive Analyzer")
 import json
 import datetime
 import numpy as np
+import string
+import random as _random
+
+
+# --- Anonymisation Helpers ---
+def _anon_hash(name):
+    """Full SHA-256 hex hash of a name."""
+    return hashlib.sha256(name.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _anon_hash_cut(name):
+    """SHA-256 hex hash truncated to 8 characters."""
+    return hashlib.sha256(name.encode("utf-8", errors="replace")).hexdigest()[:8]
+
+
+def _anon_random(name):
+    """Deterministic random string: 6-10 alphanumeric chars + 2-4 digits. Seeded from name for stability."""
+    seed = int(hashlib.sha256(name.encode("utf-8", errors="replace")).hexdigest(), 16)
+    rng = _random.Random(seed)
+    alpha_len = rng.randint(6, 10)
+    digit_len = rng.randint(2, 4)
+    letters = "".join(rng.choices(string.ascii_letters, k=alpha_len))
+    digits = "".join(rng.choices(string.digits, k=digit_len))
+    return letters + digits
+
+
+def build_anon_map(unique_names, mode):
+    """
+    Build a stable mapping {original_name → anonymised_name}.
+    'You' / 'Me' are never anonymised.
+    mode: 'off' | 'hash' | 'hash_cut' | 'random'
+    """
+    if mode == "off":
+        return {}
+    fn = {"hash": _anon_hash, "hash_cut": _anon_hash_cut, "random": _anon_random}[mode]
+    me_names = {"you", "me", "myself", "yo", "tú"}
+    return {
+        n: (n if str(n).strip().lower() in me_names else fn(str(n)))
+        for n in unique_names
+        if pd.notna(n)
+    }
+
+
+def apply_anon_to_df(df, anon_map, cols=("contact_name", "chat_name", "subject")):
+    """Apply anonymisation mapping to identity columns in-place and return df."""
+    if not anon_map:
+        return df
+    for col in cols:
+        if col in df.columns:
+            df[col] = df[col].map(lambda v: anon_map.get(v, v))
+    return df
+
+
+def av(value, anon_numbers=False, rng_seed=None):
+    """
+    Anonymise Value: if anon_numbers is True, replace numeric value with a random
+    value of similar magnitude (±50%). If False, return as-is.
+    For display only — does not affect underlying computations.
+    """
+    if not anon_numbers:
+        return value
+    if value is None or (isinstance(value, float) and (pd.isna(value) or value == 0)):
+        return value
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return value
+    if v == 0:
+        return value
+    seed = int(abs(v * 1000)) if rng_seed is None else rng_seed
+    rng = _random.Random(seed)
+    factor = rng.uniform(0.5, 1.5)
+    result = v * factor
+    # Preserve integer type if original was int-like
+    if isinstance(value, int) or (isinstance(value, float) and value == int(value)):
+        return int(round(result))
+    return result
+
 
 # --- Helper: Calculate Correlation Matrix Text ---
 def get_correlation_text(df):
@@ -32,23 +110,25 @@ def get_correlation_text(df):
     """
     if df is None or df.empty or len(df.columns) < 2:
         return None
-    
+
     # Drop rows with NaN to get valid correlation
     df_clean = df.dropna()
     if len(df_clean) < 3:  # Need at least 3 data points
         return None
-    
+
     cols = df.columns.tolist()
     correlations = []
-    
+
     for i in range(len(cols)):
         for j in range(i + 1, len(cols)):
             corr = df_clean[cols[i]].corr(df_clean[cols[j]])
             if pd.notna(corr):
                 # Format: positive = move together, negative = opposite
                 direction = "↗↗" if corr > 0.5 else "↗↘" if corr < -0.5 else "→"
-                correlations.append(f"**{cols[i]}** vs **{cols[j]}**: r={corr:.2f} {direction}")
-    
+                correlations.append(
+                    f"**{cols[i]}** vs **{cols[j]}**: r={corr:.2f} {direction}"
+                )
+
     return " | ".join(correlations) if correlations else None
 
 
@@ -58,7 +138,7 @@ def ease_in_out_cubic(alpha):
     """
     alpha = float(np.clip(alpha, 0.0, 1.0))
     if alpha < 0.5:
-        return 4.0 * alpha ** 3
+        return 4.0 * alpha**3
     return 1.0 - ((-2.0 * alpha + 2.0) ** 3) / 2.0
 
 
@@ -71,7 +151,7 @@ def build_distinct_color_map(names):
         return {}
 
     # Hash-sort names so color assignment stays stable across runs and pool changes.
-    ordered = sorted(names, key=lambda n: hashlib.sha1(n.encode('utf-8')).hexdigest())
+    ordered = sorted(names, key=lambda n: hashlib.sha1(n.encode("utf-8")).hexdigest())
     golden = 0.618033988749895
     hue = 0.13
     sat_cycle = [0.90, 0.78, 0.86]
@@ -89,10 +169,10 @@ def build_distinct_color_map(names):
 
 def build_three_month_rolling_counts(
     df_input,
-    count_mode='their_only',
+    count_mode="their_only",
     average_my_messages=False,
     top_candidates=120,
-    time_bin='D'
+    time_bin="D",
 ):
     """
     Build rolling 3-month message counts per contact using configurable counting mode.
@@ -100,79 +180,83 @@ def build_three_month_rolling_counts(
     - 'their_only': incoming messages only.
     - 'chat_total': incoming + my messages mapped to counterpart chat.
     """
-    required_cols = {'timestamp', 'contact_name'}
-    if df_input is None or df_input.empty or not required_cols.issubset(set(df_input.columns)):
+    required_cols = {"timestamp", "contact_name"}
+    if (
+        df_input is None
+        or df_input.empty
+        or not required_cols.issubset(set(df_input.columns))
+    ):
         return pd.DataFrame()
 
-    cols = ['timestamp', 'contact_name']
-    if 'from_me' in df_input.columns:
-        cols.append('from_me')
-    if 'chat_name' in df_input.columns:
-        cols.append('chat_name')
+    cols = ["timestamp", "contact_name"]
+    if "from_me" in df_input.columns:
+        cols.append("from_me")
+    if "chat_name" in df_input.columns:
+        cols.append("chat_name")
 
     work = df_input[cols].copy()
-    work['timestamp'] = pd.to_datetime(work['timestamp'], errors='coerce')
-    work = work.dropna(subset=['timestamp', 'contact_name'])
-    work['contact_name'] = work['contact_name'].astype(str).str.strip()
-    work = work[work['contact_name'] != ""]
+    work["timestamp"] = pd.to_datetime(work["timestamp"], errors="coerce")
+    work = work.dropna(subset=["timestamp", "contact_name"])
+    work["contact_name"] = work["contact_name"].astype(str).str.strip()
+    work = work[work["contact_name"] != ""]
 
-    if count_mode not in {'their_only', 'chat_total'}:
-        count_mode = 'their_only'
+    if count_mode not in {"their_only", "chat_total"}:
+        count_mode = "their_only"
 
-    if count_mode == 'their_only':
-        if 'from_me' in work.columns:
-            work = work[work['from_me'] == 0]
-        work['entity_name'] = work['contact_name']
-        work['weight'] = 1.0
+    if count_mode == "their_only":
+        if "from_me" in work.columns:
+            work = work[work["from_me"] == 0]
+        work["entity_name"] = work["contact_name"]
+        work["weight"] = 1.0
     else:
-        if 'from_me' in work.columns:
-            if 'chat_name' in work.columns:
-                work['entity_name'] = np.where(
-                    work['from_me'] == 1,
-                    work['chat_name'].fillna(''),
-                    work['contact_name'].fillna('')
+        if "from_me" in work.columns:
+            if "chat_name" in work.columns:
+                work["entity_name"] = np.where(
+                    work["from_me"] == 1,
+                    work["chat_name"].fillna(""),
+                    work["contact_name"].fillna(""),
                 )
             else:
-                work['entity_name'] = work['contact_name']
+                work["entity_name"] = work["contact_name"]
         else:
-            work['entity_name'] = work['contact_name']
+            work["entity_name"] = work["contact_name"]
 
-        work['entity_name'] = work['entity_name'].astype(str).str.strip()
-        work = work[work['entity_name'] != ""]
-        work = work[~work['entity_name'].str.lower().isin(['you', 'me', 'myself'])]
-        work['weight'] = 1.0
+        work["entity_name"] = work["entity_name"].astype(str).str.strip()
+        work = work[work["entity_name"] != ""]
+        work = work[~work["entity_name"].str.lower().isin(["you", "me", "myself"])]
+        work["weight"] = 1.0
 
         # Optional: dilute my outgoing influence by the number of people spoken with that day.
-        if average_my_messages and 'from_me' in work.columns:
-            outgoing_mask = work['from_me'] == 1
+        if average_my_messages and "from_me" in work.columns:
+            outgoing_mask = work["from_me"] == 1
             if outgoing_mask.any():
-                work['active_day'] = work['timestamp'].dt.floor('D')
+                work["active_day"] = work["timestamp"].dt.floor("D")
                 day_people = (
-                    work.loc[outgoing_mask, ['active_day', 'entity_name']]
+                    work.loc[outgoing_mask, ["active_day", "entity_name"]]
                     .drop_duplicates()
-                    .groupby('active_day')
+                    .groupby("active_day")
                     .size()
                     .astype(float)
                 )
                 divisors = (
-                    work.loc[outgoing_mask, 'active_day']
+                    work.loc[outgoing_mask, "active_day"]
                     .map(day_people)
                     .replace(0, np.nan)
                     .fillna(1.0)
                 )
-                work.loc[outgoing_mask, 'weight'] = 1.0 / divisors
+                work.loc[outgoing_mask, "weight"] = 1.0 / divisors
 
     if work.empty:
         return pd.DataFrame()
 
     try:
-        work['bucket'] = work['timestamp'].dt.floor(time_bin)
+        work["bucket"] = work["timestamp"].dt.floor(time_bin)
     except Exception:
-        time_bin = 'D'
-        work['bucket'] = work['timestamp'].dt.floor(time_bin)
+        time_bin = "D"
+        work["bucket"] = work["timestamp"].dt.floor(time_bin)
 
     daily_counts = (
-        work.groupby(['bucket', 'entity_name'])['weight']
+        work.groupby(["bucket", "entity_name"])["weight"]
         .sum()
         .unstack(fill_value=0)
         .sort_index()
@@ -183,16 +267,22 @@ def build_three_month_rolling_counts(
 
     # Keep a broad candidate pool for performance while preserving likely overtakes.
     if top_candidates and daily_counts.shape[1] > int(top_candidates):
-        keep_cols = daily_counts.sum(axis=0).sort_values(ascending=False).head(int(top_candidates)).index
+        keep_cols = (
+            daily_counts.sum(axis=0)
+            .sort_values(ascending=False)
+            .head(int(top_candidates))
+            .index
+        )
         daily_counts = daily_counts[keep_cols]
 
-    full_days = pd.date_range(daily_counts.index.min(), daily_counts.index.max(), freq=time_bin)
+    full_days = pd.date_range(
+        daily_counts.index.min(), daily_counts.index.max(), freq=time_bin
+    )
     daily_counts = daily_counts.reindex(full_days, fill_value=0)
 
     # Exact calendar 3-month rolling window per day.
     indexer = pd.api.indexers.VariableOffsetWindowIndexer(
-        index=daily_counts.index,
-        offset=pd.DateOffset(months=3)
+        index=daily_counts.index, offset=pd.DateOffset(months=3)
     )
     rolling_counts = daily_counts.rolling(window=indexer, min_periods=1).sum()
     rolling_counts = rolling_counts.loc[:, rolling_counts.max(axis=0) > 0]
@@ -201,12 +291,7 @@ def build_three_month_rolling_counts(
 
 
 def render_contact_race_video(
-    rolling_counts,
-    top_k=10,
-    fps=15,
-    seconds_per_month=2.0,
-    width=1280,
-    height=720
+    rolling_counts, top_k=10, fps=15, seconds_per_month=2.0, width=1280, height=720
 ):
     """
     Render a dynamic top-N bar chart race video from rolling contact counts.
@@ -226,7 +311,7 @@ def render_contact_race_video(
     # Stable rank snapshots used for smooth vertical motion between days.
     ranks = np.empty_like(values)
     for i in range(n_steps):
-        order = np.argsort(-values[i], kind='mergesort')
+        order = np.argsort(-values[i], kind="mergesort")
         ranks[i, order] = np.arange(n_contacts)
 
     top_k = max(1, min(int(top_k), n_contacts))
@@ -243,7 +328,9 @@ def render_contact_race_video(
     min_duration_seconds = 8.0
     hold_tail_seconds = 0.8
     base_duration_seconds = max(duration_seconds, min_duration_seconds)
-    total_frames = max(1, int(np.ceil((base_duration_seconds + hold_tail_seconds) * fps)) + 1)
+    total_frames = max(
+        1, int(np.ceil((base_duration_seconds + hold_tail_seconds) * fps)) + 1
+    )
 
     if n_steps > 1:
         step_days_arr = np.diff(elapsed_days)
@@ -253,27 +340,38 @@ def render_contact_race_video(
         step_days = 1.0
 
     color_lookup = build_distinct_color_map(names)
-    resolution_scale = float(np.clip(np.sqrt((width * height) / (1280 * 720)), 0.9, 1.8))
+    resolution_scale = float(
+        np.clip(np.sqrt((width * height) / (1280 * 720)), 0.9, 1.8)
+    )
     frame_dt = 1.0 / max(fps, 1e-9)
     smoothing_tau_seconds = 0.35
     smooth_alpha = 1.0 - np.exp(-frame_dt / max(smoothing_tau_seconds, 1e-9))
 
     fig, ax = plt.subplots(figsize=(width / 100, height / 100), dpi=100)
-    fig.patch.set_facecolor('#05070f')
-    motion_state = {'vals': None, 'pos': None, 'xmax': None}
+    fig.patch.set_facecolor("#05070f")
+    motion_state = {"vals": None, "pos": None, "xmax": None}
 
     def style_axes(x_lim):
-        ax.set_facecolor('#0b1220')
+        ax.set_facecolor("#0b1220")
         for spine in ax.spines.values():
             spine.set_visible(False)
-        ax.grid(axis='x', color='#334155', alpha=0.32, linewidth=max(1.0, 1.0 * resolution_scale))
-        ax.tick_params(axis='x', colors='#94a3b8', labelsize=10 * resolution_scale)
-        ax.tick_params(axis='y', length=0)
-        ax.xaxis.set_major_formatter(mticker.StrMethodFormatter('{x:,.0f}'))
+        ax.grid(
+            axis="x",
+            color="#334155",
+            alpha=0.32,
+            linewidth=max(1.0, 1.0 * resolution_scale),
+        )
+        ax.tick_params(axis="x", colors="#94a3b8", labelsize=10 * resolution_scale)
+        ax.tick_params(axis="y", length=0)
+        ax.xaxis.set_major_formatter(mticker.StrMethodFormatter("{x:,.0f}"))
         ax.set_xlim(0, max(x_lim, 1))
         ax.set_ylim(top_k - 0.35, -0.65)
         ax.set_yticks([])
-        ax.set_xlabel("Messages in rolling 3-month window", color='#cbd5e1', fontsize=11 * resolution_scale)
+        ax.set_xlabel(
+            "Messages in rolling 3-month window",
+            color="#cbd5e1",
+            fontsize=11 * resolution_scale,
+        )
 
     def draw_frame(frame_idx):
         elapsed_seconds = min(frame_idx / max(fps, 1e-9), base_duration_seconds)
@@ -282,7 +380,7 @@ def render_contact_race_video(
             i0 = i1 = 0
             eased = 0.0
         else:
-            i1 = int(np.searchsorted(elapsed_days, elapsed, side='right'))
+            i1 = int(np.searchsorted(elapsed_days, elapsed, side="right"))
             i1 = min(max(i1, 1), n_steps - 1)
             i0 = i1 - 1
             span = max(elapsed_days[i1] - elapsed_days[i0], 1e-9)
@@ -291,40 +389,46 @@ def render_contact_race_video(
 
         frame_values = values[i0] * (1.0 - eased) + values[i1] * eased
         frame_pos = ranks[i0] * (1.0 - eased) + ranks[i1] * eased
-        if motion_state['vals'] is None:
-            motion_state['vals'] = frame_values.copy()
-            motion_state['pos'] = frame_pos.copy()
+        if motion_state["vals"] is None:
+            motion_state["vals"] = frame_values.copy()
+            motion_state["pos"] = frame_pos.copy()
         else:
-            motion_state['vals'] = motion_state['vals'] + smooth_alpha * (frame_values - motion_state['vals'])
-            motion_state['pos'] = motion_state['pos'] + smooth_alpha * (frame_pos - motion_state['pos'])
+            motion_state["vals"] = motion_state["vals"] + smooth_alpha * (
+                frame_values - motion_state["vals"]
+            )
+            motion_state["pos"] = motion_state["pos"] + smooth_alpha * (
+                frame_pos - motion_state["pos"]
+            )
 
         # Show only the leaders plus a few near-threshold bars to make entries smoother.
         keep_n = min(top_k + 3, n_contacts)
-        visible = np.argsort(motion_state['pos'])[:keep_n]
-        visible = visible[np.argsort(motion_state['pos'][visible])]
+        visible = np.argsort(motion_state["pos"])[:keep_n]
+        visible = visible[np.argsort(motion_state["pos"][visible])]
         draw_ids = visible[:top_k]
 
-        bar_vals = motion_state['vals'][draw_ids]
-        bar_pos = motion_state['pos'][draw_ids]
+        bar_vals = motion_state["vals"][draw_ids]
+        bar_pos = motion_state["pos"][draw_ids]
         bar_names = names[draw_ids]
 
         day_max = day_top_max[i0] * (1.0 - eased) + day_top_max[i1] * eased
         x_max = max(day_max * 1.18, global_max * 0.2, 1.0)
-        if motion_state['xmax'] is None:
-            motion_state['xmax'] = x_max
+        if motion_state["xmax"] is None:
+            motion_state["xmax"] = x_max
         else:
-            motion_state['xmax'] = motion_state['xmax'] + smooth_alpha * (x_max - motion_state['xmax'])
+            motion_state["xmax"] = motion_state["xmax"] + smooth_alpha * (
+                x_max - motion_state["xmax"]
+            )
 
         ax.cla()
-        style_axes(motion_state['xmax'])
+        style_axes(motion_state["xmax"])
 
         ax.barh(
             bar_pos,
             bar_vals,
             height=0.78,
             color=[color_lookup[n] for n in bar_names],
-            edgecolor='none',
-            alpha=0.95
+            edgecolor="none",
+            alpha=0.95,
         )
 
         label_pad = 0.012 * x_max
@@ -333,59 +437,64 @@ def render_contact_race_video(
                 x + label_pad,
                 y,
                 f"{name}  {int(round(x)):,}",
-                va='center',
-                ha='left',
-                color='white',
+                va="center",
+                ha="left",
+                color="white",
                 fontsize=10 * resolution_scale,
-                fontweight='bold'
+                fontweight="bold",
             )
 
-        current_day = data.index[0] + pd.to_timedelta(elapsed, unit='D')
+        current_day = data.index[0] + pd.to_timedelta(elapsed, unit="D")
         window_start = current_day - pd.DateOffset(months=3)
-        range_fmt = '%b %d, %Y' if step_days >= 1 else '%b %d, %Y %H:%M'
+        range_fmt = "%b %d, %Y" if step_days >= 1 else "%b %d, %Y %H:%M"
 
         ax.text(
             0.01,
             1.06,
             "Top 10 Contacts • 3-Month Rolling Message Race",
             transform=ax.transAxes,
-            ha='left',
-            va='bottom',
-            color='white',
+            ha="left",
+            va="bottom",
+            color="white",
             fontsize=17 * resolution_scale,
-            fontweight='bold'
+            fontweight="bold",
         )
         ax.text(
             0.01,
             1.00,
-            current_day.strftime('%b %d, %Y %H:%M' if step_days < 1 else '%b %d, %Y'),
+            current_day.strftime("%b %d, %Y %H:%M" if step_days < 1 else "%b %d, %Y"),
             transform=ax.transAxes,
-            ha='left',
-            va='top',
-            color='#22d3ee',
+            ha="left",
+            va="top",
+            color="#22d3ee",
             fontsize=13 * resolution_scale,
-            fontweight='bold'
+            fontweight="bold",
         )
         ax.text(
             0.99,
             1.03,
             f"Window: {window_start.strftime(range_fmt)} to {current_day.strftime(range_fmt)}",
             transform=ax.transAxes,
-            ha='right',
-            va='top',
-            color='#e2e8f0',
+            ha="right",
+            va="top",
+            color="#e2e8f0",
             fontsize=10 * resolution_scale,
-            bbox=dict(facecolor='#0f172a', edgecolor='none', alpha=0.82, boxstyle=f'round,pad={0.32 * resolution_scale:.2f}')
+            bbox=dict(
+                facecolor="#0f172a",
+                edgecolor="none",
+                alpha=0.82,
+                boxstyle=f"round,pad={0.32 * resolution_scale:.2f}",
+            ),
         )
         ax.text(
             0.99,
             0.97,
             f"{fps} fps • 1 month ≈ {seconds_per_month:.1f}s",
             transform=ax.transAxes,
-            ha='right',
-            va='top',
-            color='#94a3b8',
-            fontsize=9 * resolution_scale
+            ha="right",
+            va="top",
+            color="#94a3b8",
+            fontsize=9 * resolution_scale,
         )
 
     anim = animation.FuncAnimation(
@@ -394,7 +503,7 @@ def render_contact_race_video(
         frames=total_frames,
         interval=1000 / fps,
         repeat=False,
-        blit=False
+        blit=False,
     )
 
     tmp_mp4 = None
@@ -404,19 +513,16 @@ def render_contact_race_video(
             tmp_mp4 = handle.name
 
         writer = animation.FFMpegWriter(
-            fps=fps,
-            codec='libx264',
-            bitrate=3200,
-            extra_args=['-pix_fmt', 'yuv420p']
+            fps=fps, codec="libx264", bitrate=3200, extra_args=["-pix_fmt", "yuv420p"]
         )
         anim.save(tmp_mp4, writer=writer, dpi=100)
 
-        with open(tmp_mp4, 'rb') as f:
+        with open(tmp_mp4, "rb") as f:
             return {
-                'bytes': f.read(),
-                'mime': 'video/mp4',
-                'filename': 'contact_race_3month.mp4',
-                'frame_count': total_frames
+                "bytes": f.read(),
+                "mime": "video/mp4",
+                "filename": "contact_race_3month.mp4",
+                "frame_count": total_frames,
             }
     except Exception as mp4_err:
         with tempfile.NamedTemporaryFile(suffix=".gif", delete=False) as handle:
@@ -425,13 +531,13 @@ def render_contact_race_video(
         try:
             gif_writer = animation.PillowWriter(fps=min(15, fps))
             anim.save(tmp_gif, writer=gif_writer, dpi=100)
-            with open(tmp_gif, 'rb') as f:
+            with open(tmp_gif, "rb") as f:
                 return {
-                    'bytes': f.read(),
-                    'mime': 'image/gif',
-                    'filename': 'contact_race_3month.gif',
-                    'frame_count': total_frames,
-                    'fallback_reason': str(mp4_err)
+                    "bytes": f.read(),
+                    "mime": "image/gif",
+                    "filename": "contact_race_3month.gif",
+                    "frame_count": total_frames,
+                    "fallback_reason": str(mp4_err),
                 }
         except Exception as gif_err:
             raise RuntimeError(
@@ -444,41 +550,59 @@ def render_contact_race_video(
         if tmp_gif and os.path.exists(tmp_gif):
             os.remove(tmp_gif)
 
+
 # ... (imports)
+
 
 # --- Config Management Functions ---
 # --- Config Management Functions ---
 def load_config():
-    uploaded_file = st.session_state.get('config_uploader')
+    uploaded_file = st.session_state.get("config_uploader")
     if uploaded_file is not None:
         try:
             config = json.load(uploaded_file)
             # Update session state
             for key, value in config.items():
-                if key == 'cfg_date_range':
+                if key == "cfg_date_range":
                     # Convert iso strings back to date objects
-                    st.session_state[key] = [datetime.date.fromisoformat(d) for d in value]
+                    st.session_state[key] = [
+                        datetime.date.fromisoformat(d) for d in value
+                    ]
                 else:
                     st.session_state[key] = value
             # st.rerun() not needed in callback
         except Exception as e:
             st.error(f"Error loading config: {e}")
 
+
 def get_config_json():
     # Gather keys
     config = {}
     keys_to_save = [
-        'cfg_msgstore', 'cfg_wa', 'cfg_vcf', 'cfg_date_range',
-        'cfg_ex_groups', 'cfg_ex_chan', 'cfg_ex_system', 'cfg_fam_list', 
-        'cfg_ex_fam_glob', 'cfg_ex_non_con', 'cfg_ex_fam_gend', 
-        'cfg_long_stats', 'cfg_reply_thresh', 'cfg_min_word_len', 'cfg_ex_emails'
+        "cfg_msgstore",
+        "cfg_wa",
+        "cfg_vcf",
+        "cfg_date_range",
+        "cfg_ex_groups",
+        "cfg_ex_chan",
+        "cfg_ex_system",
+        "cfg_fam_list",
+        "cfg_ex_fam_glob",
+        "cfg_ex_non_con",
+        "cfg_ex_fam_gend",
+        "cfg_long_stats",
+        "cfg_reply_thresh",
+        "cfg_min_word_len",
+        "cfg_ex_emails",
+        "cfg_anon_mode",
+        "cfg_anon_numbers",
     ]
     for k in keys_to_save:
         if k in st.session_state:
             val = st.session_state[k]
-            if isinstance(val, (list, tuple)) and k == 'cfg_date_range':
-                 # Serialize dates
-                 config[k] = [d.isoformat() for d in val]
+            if isinstance(val, (list, tuple)) and k == "cfg_date_range":
+                # Serialize dates
+                config[k] = [d.isoformat() for d in val]
             else:
                 config[k] = val
     return json.dumps(config, indent=2, sort_keys=True)
@@ -490,7 +614,7 @@ def load_group_receipt_events(msgstore_path, group_jid):
     Load per-recipient read events for outgoing messages in a specific group.
     Returns one earliest read event per (message_row_id, reader_jid).
     """
-    cols = ['message_row_id', 'reader_jid', 'msg_timestamp', 'read_timestamp']
+    cols = ["message_row_id", "reader_jid", "msg_timestamp", "read_timestamp"]
 
     if not msgstore_path or not group_jid or not os.path.exists(msgstore_path):
         return pd.DataFrame(columns=cols)
@@ -549,23 +673,31 @@ def load_group_receipt_events(msgstore_path, group_jid):
     if raw.empty:
         return pd.DataFrame(columns=cols)
 
-    raw['read_ts'] = pd.to_numeric(raw['read_ts'], errors='coerce').where(lambda s: s > 0)
-    raw['played_ts'] = pd.to_numeric(raw['played_ts'], errors='coerce').where(lambda s: s > 0)
-    raw['event_ts'] = raw['read_ts'].fillna(raw['played_ts'])
-    raw = raw[raw['event_ts'].notna()].copy()
+    raw["read_ts"] = pd.to_numeric(raw["read_ts"], errors="coerce").where(
+        lambda s: s > 0
+    )
+    raw["played_ts"] = pd.to_numeric(raw["played_ts"], errors="coerce").where(
+        lambda s: s > 0
+    )
+    raw["event_ts"] = raw["read_ts"].fillna(raw["played_ts"])
+    raw = raw[raw["event_ts"].notna()].copy()
 
     if raw.empty:
         return pd.DataFrame(columns=cols)
 
-    raw['msg_timestamp'] = pd.to_datetime(pd.to_numeric(raw['message_ts'], errors='coerce'), unit='ms', errors='coerce')
-    raw['read_timestamp'] = pd.to_datetime(raw['event_ts'], unit='ms', errors='coerce')
-    raw = raw.dropna(subset=['msg_timestamp', 'read_timestamp', 'reader_jid'])
+    raw["msg_timestamp"] = pd.to_datetime(
+        pd.to_numeric(raw["message_ts"], errors="coerce"), unit="ms", errors="coerce"
+    )
+    raw["read_timestamp"] = pd.to_datetime(raw["event_ts"], unit="ms", errors="coerce")
+    raw = raw.dropna(subset=["msg_timestamp", "read_timestamp", "reader_jid"])
 
     if raw.empty:
         return pd.DataFrame(columns=cols)
 
     # First read event per person per message.
-    raw = raw.sort_values('read_timestamp').drop_duplicates(subset=['message_row_id', 'reader_jid'], keep='first')
+    raw = raw.sort_values("read_timestamp").drop_duplicates(
+        subset=["message_row_id", "reader_jid"], keep="first"
+    )
     return raw[cols]
 
 
@@ -583,7 +715,7 @@ def load_lid_jid_map(msgstore_path):
         conn = sqlite3.connect(msgstore_path)
         df_map = pd.read_sql_query(
             "SELECT lid_row_id, jid_row_id, COALESCE(sort_id, 0) AS sort_id FROM jid_map",
-            conn
+            conn,
         )
     except Exception:
         return {}
@@ -594,17 +726,21 @@ def load_lid_jid_map(msgstore_path):
     if df_map.empty:
         return {}
 
-    df_map['lid_row_id'] = pd.to_numeric(df_map['lid_row_id'], errors='coerce')
-    df_map['jid_row_id'] = pd.to_numeric(df_map['jid_row_id'], errors='coerce')
-    df_map['sort_id'] = pd.to_numeric(df_map['sort_id'], errors='coerce').fillna(0)
-    df_map = df_map.dropna(subset=['lid_row_id', 'jid_row_id'])
+    df_map["lid_row_id"] = pd.to_numeric(df_map["lid_row_id"], errors="coerce")
+    df_map["jid_row_id"] = pd.to_numeric(df_map["jid_row_id"], errors="coerce")
+    df_map["sort_id"] = pd.to_numeric(df_map["sort_id"], errors="coerce").fillna(0)
+    df_map = df_map.dropna(subset=["lid_row_id", "jid_row_id"])
 
     if df_map.empty:
         return {}
 
     # Keep the newest mapping when duplicates exist.
-    df_map = df_map.sort_values('sort_id').drop_duplicates(subset=['lid_row_id'], keep='last')
-    return {int(r.lid_row_id): int(r.jid_row_id) for r in df_map.itertuples(index=False)}
+    df_map = df_map.sort_values("sort_id").drop_duplicates(
+        subset=["lid_row_id"], keep="last"
+    )
+    return {
+        int(r.lid_row_id): int(r.jid_row_id) for r in df_map.itertuples(index=False)
+    }
 
 
 @st.cache_data(show_spinner=False)
@@ -628,10 +764,10 @@ def load_jid_raw_lookup(msgstore_path):
     if df_jid.empty:
         return {}
 
-    df_jid['jid_id'] = pd.to_numeric(df_jid['jid_id'], errors='coerce')
-    df_jid = df_jid.dropna(subset=['jid_id'])
+    df_jid["jid_id"] = pd.to_numeric(df_jid["jid_id"], errors="coerce")
+    df_jid = df_jid.dropna(subset=["jid_id"])
     return {
-        int(r.jid_id): (str(r.raw_string) if pd.notna(r.raw_string) else '')
+        int(r.jid_id): (str(r.raw_string) if pd.notna(r.raw_string) else "")
         for r in df_jid.itertuples(index=False)
     }
 
@@ -651,15 +787,18 @@ def load_vcf_contact_lookup(vcf_path):
     except Exception:
         return {}
 
+
 # Sidebar
 st.sidebar.header("Data Sources")
 
 # --- Config Import/Export UI (Top of Sidebar for Visibility) ---
 with st.sidebar.expander("💾 Configuration Manager", expanded=False):
-    st.file_uploader("Import Config", type=['json'], key="config_uploader", on_change=load_config)
-    
+    st.file_uploader(
+        "Import Config", type=["json"], key="config_uploader", on_change=load_config
+    )
+
     st.divider()
-    
+
     # Export
     # We rely on current session state. Note: Widgets must have keys assigned below.
     json_str = get_config_json()
@@ -667,7 +806,7 @@ with st.sidebar.expander("💾 Configuration Manager", expanded=False):
         label="Download Configuration",
         data=json_str,
         file_name="wa_analyzer_config.json",
-        mime="application/json"
+        mime="application/json",
     )
 
 base_dir = os.getcwd()
@@ -677,84 +816,141 @@ default_wa = os.path.join(base_dir, "wa.db")
 default_vcf = os.path.join(base_dir, "contacts.vcf")
 
 # Widgets with Keys
-msgstore_path = st.sidebar.text_input("Msgstore Path", value=default_msgstore if os.path.exists(default_msgstore) else "", key="cfg_msgstore")
-wa_path = st.sidebar.text_input("WA DB Path", value=default_wa if os.path.exists(default_wa) else "", key="cfg_wa")
-vcf_path = st.sidebar.text_input("VCF Path", value=default_vcf if os.path.exists(default_vcf) else "", key="cfg_vcf")
+msgstore_path = st.sidebar.text_input(
+    "Msgstore Path",
+    value=default_msgstore if os.path.exists(default_msgstore) else "",
+    key="cfg_msgstore",
+)
+wa_path = st.sidebar.text_input(
+    "WA DB Path", value=default_wa if os.path.exists(default_wa) else "", key="cfg_wa"
+)
+vcf_path = st.sidebar.text_input(
+    "VCF Path", value=default_vcf if os.path.exists(default_vcf) else "", key="cfg_vcf"
+)
 
 if st.sidebar.button("Load Data"):
     with st.spinner("Parsing databases..."):
         parser = WhatsappParser(msgstore_path, wa_path, vcf_path)
         df = parser.get_merged_data()
-        
+
         if df.empty:
             st.error("Failed to parse data or no messages found.")
         else:
-            st.session_state['data'] = df
+            st.session_state["data"] = df
             st.success(f"Loaded {len(df)} messages!")
 
-if 'data' in st.session_state:
-    df_raw = st.session_state['data']
-    
+if "data" in st.session_state:
+    df_raw = st.session_state["data"]
+
+    # --- Apply Anonymisation (before any filtering/display) ---
+    _anon_mode_label = st.session_state.get("cfg_anon_mode", "Off")
+    _anon_mode_map = {
+        "Off": "off",
+        "Hash All": "hash",
+        "Hash + Cut (8 chars)": "hash_cut",
+        "Fully Randomised": "random",
+    }
+    _anon_key = _anon_mode_map.get(_anon_mode_label, "off")
+    _anon_numbers = (
+        st.session_state.get("cfg_anon_numbers", False) and _anon_key != "off"
+    )
+    _anon_map = {}
+    if _anon_key != "off":
+        _all_names = set()
+        for _col in ("contact_name", "chat_name", "subject"):
+            if _col in df_raw.columns:
+                _all_names.update(df_raw[_col].dropna().unique())
+        _anon_map = build_anon_map(_all_names, _anon_key)
+        df_raw = apply_anon_to_df(df_raw.copy(), _anon_map)
+
     # --- Sidebar Filtering ---
     st.sidebar.subheader("Filters")
-    
+
     # Date Filter
-    min_date = df_raw['timestamp'].min().date()
-    max_date = df_raw['timestamp'].max().date()
-    
-    # We pass the default value here. If 'cfg_date_range' is already in session_state 
+    min_date = df_raw["timestamp"].min().date()
+    max_date = df_raw["timestamp"].max().date()
+
+    # We pass the default value here. If 'cfg_date_range' is already in session_state
     # (e.g. from loaded config), Streamlit will use that value instead.
     # We do NOT manually set session_state['cfg_date_range'] here to avoid conflicts.
-    
+
     # Quick Date Buttons
     st.sidebar.caption("Quick Date Filters")
     cols_q = st.sidebar.columns(5)
     labels = ["3M", "6M", "1Y", "3Y", "10Y"]
-    offsets = [3, 6, 12, 36, 120] # Months
-    
+    offsets = [3, 6, 12, 36, 120]  # Months
+
     for i, label in enumerate(labels):
         if cols_q[i].button(label):
             new_start = max_date - pd.DateOffset(months=offsets[i])
             # Convert to date object because date_input expects dates
             new_start = new_start.date()
-            if new_start < min_date: new_start = min_date
-            st.session_state['cfg_date_range'] = [new_start, max_date]
+            if new_start < min_date:
+                new_start = min_date
+            st.session_state["cfg_date_range"] = [new_start, max_date]
             st.rerun()
 
     if st.sidebar.button("Reset Date"):
-         st.session_state['cfg_date_range'] = [min_date, max_date]
-         st.rerun()
-    
+        st.session_state["cfg_date_range"] = [min_date, max_date]
+        st.rerun()
+
     date_range = st.sidebar.date_input(
-        "Date Range", 
-        value=[min_date, max_date], 
-        min_value=min_date, 
+        "Date Range",
+        value=[min_date, max_date],
+        min_value=min_date,
         max_value=max_date,
-        key="cfg_date_range"
+        key="cfg_date_range",
     )
-    
+
     # --- Identity Status ---
     st.sidebar.markdown("### 👤 Identity Status")
-    n_sent = len(df_raw[df_raw['from_me'] == 1])
-    n_recv = len(df_raw[df_raw['from_me'] == 0])
-    st.sidebar.caption(f"Detected **{n_sent:,}** sent and **{n_recv:,}** received messages.")
+    n_sent = len(df_raw[df_raw["from_me"] == 1])
+    n_recv = len(df_raw[df_raw["from_me"] == 0])
+    st.sidebar.caption(
+        f"Detected **{av(n_sent, _anon_numbers):,}** sent and **{av(n_recv, _anon_numbers):,}** received messages."
+    )
     st.sidebar.divider()
-    
+
+    st.sidebar.subheader("🔒 Anonymisation")
+    anon_mode = st.sidebar.selectbox(
+        "Anonymisation Mode",
+        ["Off", "Hash All", "Hash + Cut (8 chars)", "Fully Randomised"],
+        key="cfg_anon_mode",
+        help="Anonymise contact names/labels before processing. All stats and charts update normally.",
+    )
+    if anon_mode != "Off":
+        st.sidebar.checkbox(
+            "Also anonymise numeric values",
+            value=False,
+            key="cfg_anon_numbers",
+            help="Replace absolute numbers (message counts, reply times, etc.) with randomised values of similar magnitude.",
+        )
+    st.sidebar.divider()
+
     # Exclude Groups Filter
-    exclude_groups = st.sidebar.checkbox("Exclude Groups", value=False, key="cfg_ex_groups")
-    
+    exclude_groups = st.sidebar.checkbox(
+        "Exclude Groups", value=False, key="cfg_ex_groups"
+    )
+
     # Exclude Me Filter
-    exclude_me = st.sidebar.checkbox("Exclude 'Me/You' from Charts", value=True, key="cfg_ex_me", help="Remove your own sent messages from Activity and Top Talkers charts.")
-    
+    exclude_me = st.sidebar.checkbox(
+        "Exclude 'Me/You' from Charts",
+        value=True,
+        key="cfg_ex_me",
+        help="Remove your own sent messages from Activity and Top Talkers charts.",
+    )
+
     # Family Filter
     st.sidebar.subheader("Contact Management")
-    all_contacts = sorted(df_raw['contact_name'].unique().astype(str))
-    
+    all_contacts = sorted(df_raw["contact_name"].unique().astype(str))
+
     # Try to find "Me" or "You" for default selection
     default_fam = []
-    if 'cfg_fam_list' not in st.session_state:
+    if "cfg_fam_list" not in st.session_state:
         for candidate in ["You", "Me", "Myself", "Tú", "Yo"]:
-            match = next((c for c in all_contacts if candidate.lower() == c.lower()), None)
+            match = next(
+                (c for c in all_contacts if candidate.lower() == c.lower()), None
+            )
             if match:
                 default_fam.append(match)
     else:
@@ -762,118 +958,160 @@ if 'data' in st.session_state:
         # Actually standard behavior of multiselect with 'default' is tricky if key exists.
         # If key exists, it overrides 'default'. So we just depend on key.
         pass
-            
+
     family_list = st.sidebar.multiselect(
-        "Select Family / Close Contacts", 
-        all_contacts, 
-        default=default_fam if 'cfg_fam_list' not in st.session_state else None,
-        key="cfg_fam_list"
+        "Select Family / Close Contacts",
+        all_contacts,
+        default=default_fam if "cfg_fam_list" not in st.session_state else None,
+        key="cfg_fam_list",
     )
-    
-    exclude_family_global = st.sidebar.checkbox("Exclude Family from ALL Stats", value=False, key="cfg_ex_fam_glob")
-    exclude_non_contacts = st.sidebar.checkbox("Exclude Non-Contacts from ALL Stats", value=False, key="cfg_ex_non_con")
-    exclude_channels = st.sidebar.checkbox("Exclude Channels / Announcements", value=True, help="Removes WhatsApp Channels (@newsletter) and Status Broadcasts", key="cfg_ex_chan")
-    exclude_system = st.sidebar.checkbox("Exclude System / Security Messages", value=True, help="Removes encryption notices and system markers (Type 7)", key="cfg_ex_system")
-    exclude_family_gender = st.sidebar.checkbox("Exclude Family from GENDER Stats Only", value=False, key="cfg_ex_fam_gend")
-    exclude_family_behavior = st.sidebar.checkbox("Exclude Family from BEHAVIORAL Stats", value=False, key="cfg_ex_fam_beh")
-    
+
+    exclude_family_global = st.sidebar.checkbox(
+        "Exclude Family from ALL Stats", value=False, key="cfg_ex_fam_glob"
+    )
+    exclude_non_contacts = st.sidebar.checkbox(
+        "Exclude Non-Contacts from ALL Stats", value=False, key="cfg_ex_non_con"
+    )
+    exclude_channels = st.sidebar.checkbox(
+        "Exclude Channels / Announcements",
+        value=True,
+        help="Removes WhatsApp Channels (@newsletter) and Status Broadcasts",
+        key="cfg_ex_chan",
+    )
+    exclude_system = st.sidebar.checkbox(
+        "Exclude System / Security Messages",
+        value=True,
+        help="Removes encryption notices and system markers (Type 7)",
+        key="cfg_ex_system",
+    )
+    exclude_family_gender = st.sidebar.checkbox(
+        "Exclude Family from GENDER Stats Only", value=False, key="cfg_ex_fam_gend"
+    )
+    exclude_family_behavior = st.sidebar.checkbox(
+        "Exclude Family from BEHAVIORAL Stats", value=False, key="cfg_ex_fam_beh"
+    )
+
     # Behavioral Config
     st.sidebar.subheader("Behavioral Config")
-    use_medians = st.sidebar.checkbox("Use Median for Stats", value=False, help="Switch between Average and Median for all statistical metrics (Reply times, write times, word counts).", key="cfg_use_median")
-    use_longer_stats = st.sidebar.checkbox("Use Longer Time Stats", value=False, help="Ghosting: 5 days (vs 24h), Initiation: 2 days (vs 6h)", key="cfg_long_stats")
-    
+    use_medians = st.sidebar.checkbox(
+        "Use Median for Stats",
+        value=False,
+        help="Switch between Average and Median for all statistical metrics (Reply times, write times, word counts).",
+        key="cfg_use_median",
+    )
+    use_longer_stats = st.sidebar.checkbox(
+        "Use Longer Time Stats",
+        value=False,
+        help="Ghosting: 5 days (vs 24h), Initiation: 2 days (vs 6h)",
+        key="cfg_long_stats",
+    )
+
     reply_threshold_hours = st.sidebar.slider(
-        "Max Reply Delay (Hours)", 
-        min_value=1, 
-        max_value=120, 
+        "Max Reply Delay (Hours)",
+        min_value=1,
+        max_value=120,
         value=12,
         help="Messages after this delay are considered new conversations, not replies.",
-        key="cfg_reply_thresh"
+        key="cfg_reply_thresh",
     )
-    
+
     min_word_len = st.sidebar.number_input(
-        "Min Word Length (Word Cloud)", 
-        min_value=1, 
-        max_value=20, 
-        value=4, 
-        key="cfg_min_word_len"
+        "Min Word Length (Word Cloud)",
+        min_value=1,
+        max_value=20,
+        value=4,
+        key="cfg_min_word_len",
     )
-    
-    exclude_emails = st.sidebar.checkbox("Exclude Emails from Word Cloud", value=False, key="cfg_ex_emails")
-    
+
+    exclude_emails = st.sidebar.checkbox(
+        "Exclude Emails from Word Cloud", value=False, key="cfg_ex_emails"
+    )
+
     # Apply Global Filters
     # 1. Base Filters (Used for Chat Explorer & Identity)
     df_base = df_raw.copy()
-    
+
     # Helper for identifying non-contacts (no letters in name)
     import re
+
     def is_number(name):
-        return not bool(re.search('[a-zA-Z]', str(name)))
+        return not bool(re.search("[a-zA-Z]", str(name)))
 
     # SECURITY MESSAGES (ALWAYS EXCLUDE)
-    if 'message_type' in df_base.columns:
-        df_base = df_base[df_base['message_type'] != 7]
+    if "message_type" in df_base.columns:
+        df_base = df_base[df_base["message_type"] != 7]
 
     if len(date_range) == 2:
-        mask = (df_base['timestamp'].dt.date >= date_range[0]) & (df_base['timestamp'].dt.date <= date_range[1])
+        mask = (df_base["timestamp"].dt.date >= date_range[0]) & (
+            df_base["timestamp"].dt.date <= date_range[1]
+        )
         df_base = df_base.loc[mask]
 
     # Dedicated group source: same global filters except "Exclude Groups"
     # so Group Explorer remains usable even when groups are hidden elsewhere.
     df_group_base = df_base.copy()
-    if 'is_group' not in df_group_base.columns:
-        if 'raw_string' in df_group_base.columns:
-            df_group_base['is_group'] = df_group_base['raw_string'].astype(str).str.endswith('@g.us')
+    if "is_group" not in df_group_base.columns:
+        if "raw_string" in df_group_base.columns:
+            df_group_base["is_group"] = (
+                df_group_base["raw_string"].astype(str).str.endswith("@g.us")
+            )
         else:
-            df_group_base['is_group'] = False
+            df_group_base["is_group"] = False
 
-    if exclude_groups and 'raw_string' in df_base.columns:
-        is_group = df_base['raw_string'].astype(str).str.endswith('@g.us')
+    if exclude_groups and "raw_string" in df_base.columns:
+        is_group = df_base["raw_string"].astype(str).str.endswith("@g.us")
         df_base = df_base[~is_group]
 
-    if exclude_channels and 'raw_string' in df_base.columns:
+    if exclude_channels and "raw_string" in df_base.columns:
         # Channels usually end in @newsletter. Status is status@broadcast. Official WA is 0@s.whatsapp.net
         is_channel = (
-            df_base['raw_string'].astype(str).str.endswith('@newsletter') | 
-            (df_base['raw_string'] == 'status@broadcast') |
-            (df_base['raw_string'] == '0@s.whatsapp.net')
+            df_base["raw_string"].astype(str).str.endswith("@newsletter")
+            | (df_base["raw_string"] == "status@broadcast")
+            | (df_base["raw_string"] == "0@s.whatsapp.net")
         )
         df_base = df_base[~is_channel]
-    if exclude_channels and 'raw_string' in df_group_base.columns:
+    if exclude_channels and "raw_string" in df_group_base.columns:
         is_channel_group = (
-            df_group_base['raw_string'].astype(str).str.endswith('@newsletter') |
-            (df_group_base['raw_string'] == 'status@broadcast') |
-            (df_group_base['raw_string'] == '0@s.whatsapp.net')
+            df_group_base["raw_string"].astype(str).str.endswith("@newsletter")
+            | (df_group_base["raw_string"] == "status@broadcast")
+            | (df_group_base["raw_string"] == "0@s.whatsapp.net")
         )
         df_group_base = df_group_base[~is_channel_group]
-    
+
     # System Messages (Type 7) - Already excluded above unconditionally
     # if exclude_system and 'message_type' in filtered_df.columns:
     #     filtered_df = filtered_df[filtered_df['message_type'] != 7]
-        
+
     if exclude_family_global and family_list:
-        df_base = df_base[~df_base['chat_name'].isin(family_list)]
-        df_group_base = df_group_base[~df_group_base['chat_name'].isin(family_list)]
+        df_base = df_base[~df_base["chat_name"].isin(family_list)]
+        df_group_base = df_group_base[~df_group_base["chat_name"].isin(family_list)]
     if exclude_non_contacts:
         # Remove those that appear to be just numbers
-        mask_nums = df_base['contact_name'].apply(is_number)
+        mask_nums = df_base["contact_name"].apply(is_number)
         df_base = df_base[~mask_nums]
 
     # 2. View Filters (Used for General Stats where Me skews it)
     filtered_df = df_base.copy()
     if exclude_me:
-        filtered_df = filtered_df[filtered_df['from_me'] == 0]
+        filtered_df = filtered_df[filtered_df["from_me"] == 0]
 
     # Update Identity Info with Phone Number attempt
     me_jid = None
-    me_rows = df_raw[df_raw['from_me'] == 1]
+    me_rows = df_raw[df_raw["from_me"] == 1]
     if not me_rows.empty:
-        possible = me_rows['sender_string'].dropna().unique()
+        possible = me_rows["sender_string"].dropna().unique()
         if len(possible) > 0:
             me_jid = possible[0]
-    
-    me_display = me_jid.split('@')[0] if me_jid else "Unknown"
-        
+
+    me_display = me_jid.split("@")[0] if me_jid else "Unknown"
+    if _anon_key != "off":
+        _anon_fn = {
+            "hash": _anon_hash,
+            "hash_cut": _anon_hash_cut,
+            "random": _anon_random,
+        }[_anon_key]
+        me_display = _anon_fn(me_display)
+
     st.sidebar.markdown(f"**User**: {me_display}")
 
     analyzer = WhatsappAnalyzer(filtered_df, use_medians=use_medians)
@@ -881,180 +1119,274 @@ if 'data' in st.session_state:
     # --- KPI Row ---
     # Fix: Calculate Stats from df_base (Unfiltered) to avoid "Sent: 0" when Exclude Me is on
     total_msgs_raw = len(df_base)
-    sent_raw = df_base[df_base['from_me'] == 1].shape[0]
+    sent_raw = df_base[df_base["from_me"] == 1].shape[0]
     received_raw = total_msgs_raw - sent_raw
-    unique_contacts_raw = df_base['contact_name'].nunique()
-    
+    unique_contacts_raw = df_base["contact_name"].nunique()
+
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total Messages", f"{total_msgs_raw:,}")
-    col2.metric("Sent", f"{sent_raw:,}")
-    col3.metric("Received", f"{received_raw:,}")
-    col4.metric("Unique Contacts", unique_contacts_raw)
+    col1.metric("Total Messages", f"{av(total_msgs_raw, _anon_numbers):,}")
+    col2.metric("Sent", f"{av(sent_raw, _anon_numbers):,}")
+    col3.metric("Received", f"{av(received_raw, _anon_numbers):,}")
+    col4.metric("Unique Contacts", av(unique_contacts_raw, _anon_numbers))
 
     # --- Tabs ---
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-        "📊 Activity & Top Users",
-        "🔥 Behavioral Patterns",
-        "👫 Gender Insights",
-        "📝 Word Cloud",
-        "🔍 Chat Explorer",
-        "👥 Group Explorer",
-        "🎪 Fun & Insights",
-        "🗺️ Map"
-    ])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
+        [
+            "📊 Activity & Top Users",
+            "🔥 Behavioral Patterns",
+            "👫 Gender Insights",
+            "📝 Word Cloud",
+            "🔍 Chat Explorer",
+            "👥 Group Explorer",
+            "🎪 Fun & Insights",
+            "🗺️ Map",
+        ]
+    )
 
     with tab1:
         col_l, col_r = st.columns(2)
-        
+
         with col_l:
             st.subheader("Top Talkers")
-            
+
             # Filter by Category
-            cat_filter = st.selectbox("Filter by Category", ["All", "Only Female", "Only Male", "Only Unknown", "Only Groups", "Only Non-Contacts"])
-            
+            cat_filter = st.selectbox(
+                "Filter by Category",
+                [
+                    "All",
+                    "Only Female",
+                    "Only Male",
+                    "Only Unknown",
+                    "Only Groups",
+                    "Only Non-Contacts",
+                ],
+            )
+
             rank_by_words = st.checkbox("Rank by Total Words", value=False)
-            metric_arg = 'words' if rank_by_words else 'messages'
-            
+            metric_arg = "words" if rank_by_words else "messages"
+
             # Fetch a large number first to ensure we fill the top 20 after filtering
-            top_talkers_df = analyzer.get_top_talkers(1000, metric=metric_arg, exclude_me=exclude_me) 
-            
+            top_talkers_df = analyzer.get_top_talkers(
+                1000, metric=metric_arg, exclude_me=exclude_me
+            )
+
             if cat_filter == "Only Female":
-                top_talkers_df = top_talkers_df[top_talkers_df['gender'] == 'female']
+                top_talkers_df = top_talkers_df[top_talkers_df["gender"] == "female"]
             elif cat_filter == "Only Male":
-                top_talkers_df = top_talkers_df[top_talkers_df['gender'] == 'male']
+                top_talkers_df = top_talkers_df[top_talkers_df["gender"] == "male"]
             elif cat_filter == "Only Unknown":
-                top_talkers_df = top_talkers_df[top_talkers_df['gender'] == 'unknown']
+                top_talkers_df = top_talkers_df[top_talkers_df["gender"] == "unknown"]
             elif cat_filter == "Only Groups":
-                top_talkers_df = top_talkers_df[top_talkers_df['is_group'] == True]
+                top_talkers_df = top_talkers_df[top_talkers_df["is_group"] == True]
             elif cat_filter == "Only Non-Contacts":
-                mask = top_talkers_df['contact_name'].apply(is_number)
+                mask = top_talkers_df["contact_name"].apply(is_number)
                 top_talkers_df = top_talkers_df[mask]
-            
+
             # Slice top 20 after filtering
             top_talkers_final = top_talkers_df.head(20)
-            
-            fig_bar = px.bar(top_talkers_final, x='count', y='contact_name', orientation='h', 
-                             color='gender', title=f"Most Active Contacts ({cat_filter})",
-                             color_discrete_map={'male': '#636EFA', 'female': '#EF553B', 'unknown': 'gray'})
-            fig_bar.update_layout(yaxis={'categoryorder':'total ascending', 'type': 'category'}, height=600)
-            st.plotly_chart(fig_bar, width='stretch')
-            
+
+            fig_bar = px.bar(
+                top_talkers_final,
+                x="count",
+                y="contact_name",
+                orientation="h",
+                color="gender",
+                title=f"Most Active Contacts ({cat_filter})",
+                color_discrete_map={
+                    "male": "#636EFA",
+                    "female": "#EF553B",
+                    "unknown": "gray",
+                },
+            )
+            fig_bar.update_layout(
+                yaxis={"categoryorder": "total ascending", "type": "category"},
+                height=600,
+            )
+            st.plotly_chart(fig_bar, width="stretch")
+
         with col_r:
             st.subheader("Hourly Activity")
-            split_opt = st.selectbox("Split by:", ["None", "Gender", "Type (Group/Indiv)"], key="hourly_split")
-            
+            split_opt = st.selectbox(
+                "Split by:",
+                ["None", "Gender", "Type (Group/Indiv)"],
+                key="hourly_split",
+            )
+
             split_arg = None
-            if split_opt == "Gender": split_arg = 'gender'
-            elif split_opt.startswith("Type"): split_arg = 'group'
-            
-            hourly = analyzer.get_hourly_activity(split_by=split_arg, exclude_me=exclude_me)
-            
+            if split_opt == "Gender":
+                split_arg = "gender"
+            elif split_opt.startswith("Type"):
+                split_arg = "group"
+
+            hourly = analyzer.get_hourly_activity(
+                split_by=split_arg, exclude_me=exclude_me
+            )
+
             if split_arg:
-                fig_line = px.line(hourly, x=hourly.index, y=hourly.columns, markers=True, 
-                                   labels={'value': 'Count', 'timestamp': 'Hour'},
-                                   title=f"Activity by Hour (Split by {split_opt})")
-                st.plotly_chart(fig_line, width='stretch')
+                fig_line = px.line(
+                    hourly,
+                    x=hourly.index,
+                    y=hourly.columns,
+                    markers=True,
+                    labels={"value": "Count", "timestamp": "Hour"},
+                    title=f"Activity by Hour (Split by {split_opt})",
+                )
+                st.plotly_chart(fig_line, width="stretch")
                 # Show correlation
                 corr_text = get_correlation_text(hourly)
                 if corr_text:
                     st.caption(f"📊 Correlation: {corr_text}")
             else:
-                fig_line = px.line(x=hourly.index, y=hourly.values, markers=True, 
-                                   labels={'x': 'Hour of Day', 'y': 'Message Count'},
-                                   title="Activity by Hour")
-                st.plotly_chart(fig_line, width='stretch')
-            
+                fig_line = px.line(
+                    x=hourly.index,
+                    y=hourly.values,
+                    markers=True,
+                    labels={"x": "Hour of Day", "y": "Message Count"},
+                    title="Activity by Hour",
+                )
+                st.plotly_chart(fig_line, width="stretch")
 
         st.subheader("Message Volume Over Time")
         show_as_lines = st.checkbox("Show as Lines (Easier Comparison)", value=False)
         plot_func = px.line if show_as_lines else px.area
 
         col_t1, col_t2 = st.columns(2)
-        
+
         with col_t1:
-            split_opt_m = st.selectbox("Split Total by:", ["None", "Gender", "Type (Group/Indiv)"], key="monthly_split")
-            
+            split_opt_m = st.selectbox(
+                "Split Total by:",
+                ["None", "Gender", "Type (Group/Indiv)"],
+                key="monthly_split",
+            )
+
             split_arg_m = None
-            if split_opt_m == "Gender": split_arg_m = 'gender'
-            elif split_opt_m.startswith("Type"): split_arg_m = 'group'
-            
-            monthly = analyzer.get_monthly_activity(split_by=split_arg_m, exclude_me=exclude_me)
-            
+            if split_opt_m == "Gender":
+                split_arg_m = "gender"
+            elif split_opt_m.startswith("Type"):
+                split_arg_m = "group"
+
+            monthly = analyzer.get_monthly_activity(
+                split_by=split_arg_m, exclude_me=exclude_me
+            )
+
             if split_arg_m:
-                color_map = {'male': '#636EFA', 'female': '#EF553B', 'unknown': 'gray'} if split_arg_m == 'gender' else None
-                fig_time = plot_func(monthly, 
-                                     title=f"Total Volume (Split by {split_opt_m})",
-                                     color_discrete_map=color_map)
-                st.plotly_chart(fig_time, width='stretch')
+                color_map = (
+                    {"male": "#636EFA", "female": "#EF553B", "unknown": "gray"}
+                    if split_arg_m == "gender"
+                    else None
+                )
+                fig_time = plot_func(
+                    monthly,
+                    title=f"Total Volume (Split by {split_opt_m})",
+                    color_discrete_map=color_map,
+                )
+                st.plotly_chart(fig_time, width="stretch")
                 # Show correlation
                 corr_text = get_correlation_text(monthly)
                 if corr_text:
                     st.caption(f"📊 Correlation: {corr_text}")
             else:
-                fig_time = plot_func(x=monthly.index, y=monthly.values, title="Total Volume")
-                st.plotly_chart(fig_time, width='stretch')
-            
+                fig_time = plot_func(
+                    x=monthly.index, y=monthly.values, title="Total Volume"
+                )
+                st.plotly_chart(fig_time, width="stretch")
 
         with col_t2:
             st.write(f"**Top Contacts Volume ({cat_filter})**")
             # Use the already filtered top_talkers_df
-            top_contacts_list = top_talkers_final['contact_name'].head(10).tolist()
+            top_contacts_list = top_talkers_final["contact_name"].head(10).tolist()
             if top_contacts_list:
-                monthly_contacts = analyzer.get_activity_over_time_by_contact(top_contacts_list)
-                fig_contacts = plot_func(monthly_contacts,
-                                       title=f"Top 10 Contacts Activity ({cat_filter})")
-                st.plotly_chart(fig_contacts, width='stretch')
+                monthly_contacts = analyzer.get_activity_over_time_by_contact(
+                    top_contacts_list
+                )
+                fig_contacts = plot_func(
+                    monthly_contacts, title=f"Top 10 Contacts Activity ({cat_filter})"
+                )
+                st.plotly_chart(fig_contacts, width="stretch")
             else:
                 st.info("No contacts match filter.")
-        
+
         # --- Message Dispersion Over Time ---
         st.subheader("📊 Message Dispersion Over Time")
-        st.caption("**High dispersion** = Messages spread evenly across many chats. **Low dispersion** = Focused on specific people.")
-        
+        st.caption(
+            "**High dispersion** = Messages spread evenly across many chats. **Low dispersion** = Focused on specific people."
+        )
+
         disp_col1, disp_col2 = st.columns(2)
         with disp_col1:
-            split_opt_disp = st.selectbox("Split Dispersion by:", ["None", "Gender", "Type (Group/Indiv)"], key="dispersion_split")
+            split_opt_disp = st.selectbox(
+                "Split Dispersion by:",
+                ["None", "Gender", "Type (Group/Indiv)"],
+                key="dispersion_split",
+            )
         with disp_col2:
-            smooth_dispersion = st.checkbox("Smooth (3-month avg)", value=False, key="dispersion_smooth", 
-                                            help="Apply 3-month rolling average to reduce volatility from low-activity months")
-        
+            smooth_dispersion = st.checkbox(
+                "Smooth (3-month avg)",
+                value=False,
+                key="dispersion_smooth",
+                help="Apply 3-month rolling average to reduce volatility from low-activity months",
+            )
+
         split_arg_disp = None
-        if split_opt_disp == "Gender": split_arg_disp = 'gender'
-        elif split_opt_disp.startswith("Type"): split_arg_disp = 'group'
-        
-        dispersion = analyzer.get_message_dispersion_over_time(split_by=split_arg_disp, exclude_me=exclude_me)
-        
+        if split_opt_disp == "Gender":
+            split_arg_disp = "gender"
+        elif split_opt_disp.startswith("Type"):
+            split_arg_disp = "group"
+
+        dispersion = analyzer.get_message_dispersion_over_time(
+            split_by=split_arg_disp, exclude_me=exclude_me
+        )
+
         # Apply smoothing if enabled
         if smooth_dispersion:
             if isinstance(dispersion, pd.Series):
-                dispersion = dispersion.rolling(window=3, min_periods=1, center=True).mean()
+                dispersion = dispersion.rolling(
+                    window=3, min_periods=1, center=True
+                ).mean()
             elif isinstance(dispersion, pd.DataFrame):
-                dispersion = dispersion.rolling(window=3, min_periods=1, center=True).mean()
-        
+                dispersion = dispersion.rolling(
+                    window=3, min_periods=1, center=True
+                ).mean()
+
         if isinstance(dispersion, pd.Series):
             # Single series (no split)
             if not dispersion.empty and dispersion.notna().any():
-                fig_disp = px.line(x=dispersion.index, y=dispersion.values, markers=True,
-                                   labels={'x': 'Month', 'y': 'Dispersion (%)'},
-                                   title="Message Dispersion Over Time")
-                fig_disp.update_traces(connectgaps=False)  # Skip gaps instead of connecting
+                fig_disp = px.line(
+                    x=dispersion.index,
+                    y=dispersion.values,
+                    markers=True,
+                    labels={"x": "Month", "y": "Dispersion (%)"},
+                    title="Message Dispersion Over Time",
+                )
+                fig_disp.update_traces(
+                    connectgaps=False
+                )  # Skip gaps instead of connecting
                 fig_disp.update_layout(yaxis_range=[0, 100])
-                st.plotly_chart(fig_disp, width='stretch')
+                st.plotly_chart(fig_disp, width="stretch")
             else:
                 st.info("Not enough data to calculate dispersion.")
         elif isinstance(dispersion, pd.DataFrame) and not dispersion.empty:
             # DataFrame with multiple columns (split by gender/group)
             color_map = None
-            if split_arg_disp == 'gender':
-                color_map = {'male': '#636EFA', 'female': '#EF553B', 'unknown': 'gray'}
-            
-            fig_disp = px.line(dispersion, x=dispersion.index, y=dispersion.columns, markers=True,
-                               labels={'value': 'Dispersion (%)', 'index': 'Month', 'variable': split_opt_disp},
-                               title=f"Message Dispersion Over Time (Split by {split_opt_disp})",
-                               color_discrete_map=color_map)
+            if split_arg_disp == "gender":
+                color_map = {"male": "#636EFA", "female": "#EF553B", "unknown": "gray"}
+
+            fig_disp = px.line(
+                dispersion,
+                x=dispersion.index,
+                y=dispersion.columns,
+                markers=True,
+                labels={
+                    "value": "Dispersion (%)",
+                    "index": "Month",
+                    "variable": split_opt_disp,
+                },
+                title=f"Message Dispersion Over Time (Split by {split_opt_disp})",
+                color_discrete_map=color_map,
+            )
             fig_disp.update_traces(connectgaps=False)  # Skip gaps instead of connecting
             fig_disp.update_layout(yaxis_range=[0, 100])
-            st.plotly_chart(fig_disp, width='stretch')
+            st.plotly_chart(fig_disp, width="stretch")
             # Show correlation
             corr_text = get_correlation_text(dispersion)
             if corr_text:
@@ -1075,20 +1407,20 @@ if 'data' in st.session_state:
             "60 FPS high precision",
             value=False,
             key="race_60fps",
-            help="Uses 60 fps + 6-hour sampling for smoother overtakes at the same overall speed."
+            help="Uses 60 fps + 6-hour sampling for smoother overtakes at the same overall speed.",
         )
         include_chat_sum = race_c2.checkbox(
             "Include my msgs in each chat total",
             value=False,
             key="race_include_chat_sum",
-            help="Off: only their incoming messages. On: each person's total = their messages + mine in that chat."
+            help="Off: only their incoming messages. On: each person's total = their messages + mine in that chat.",
         )
         average_my_msgs = race_c3.checkbox(
             "Average my msgs by people spoken",
             value=False,
             key="race_average_my_msgs",
             disabled=not include_chat_sum,
-            help="When enabled, my outgoing messages are weighted by 1 / people I spoke with that day."
+            help="When enabled, my outgoing messages are weighted by 1 / people I spoke with that day.",
         )
 
         race_c4, race_c5 = st.columns(2)
@@ -1099,13 +1431,13 @@ if 'data' in st.session_state:
             value=120,
             step=10,
             key="race_candidate_pool",
-            help="Larger pools capture more late overtakes but render slower."
+            help="Larger pools capture more late overtakes but render slower.",
         )
         quality = race_c5.selectbox(
             "Video quality",
             ["Preview (960x540)", "HD (1280x720)", "Full HD (1920x1080)"],
             index=1,
-            key="race_video_quality"
+            key="race_video_quality",
         )
         seconds_per_month = st.slider(
             "Seconds per month",
@@ -1114,30 +1446,34 @@ if 'data' in st.session_state:
             value=4.0,
             step=0.5,
             key="race_seconds_per_month",
-            help="Higher values slow down the race. 4.0 is smoother and easier to read than 2.0."
+            help="Higher values slow down the race. 4.0 is smoother and easier to read than 2.0.",
         )
 
         if st.button("Generate Bar Chart Race Video", key="race_video_generate"):
-            with st.spinner("Rendering race video... this may take a while on large date ranges."):
+            with st.spinner(
+                "Rendering race video... this may take a while on large date ranges."
+            ):
                 fps_value = 60 if race_60fps else 15
-                bucket_freq = '6h' if race_60fps else 'D'
-                count_mode = 'chat_total' if include_chat_sum else 'their_only'
+                bucket_freq = "6h" if race_60fps else "D"
+                count_mode = "chat_total" if include_chat_sum else "their_only"
                 rolling_counts = build_three_month_rolling_counts(
                     df_base,
                     count_mode=count_mode,
                     average_my_messages=(average_my_msgs and include_chat_sum),
                     top_candidates=candidate_pool,
-                    time_bin=bucket_freq
+                    time_bin=bucket_freq,
                 )
 
                 if rolling_counts.empty:
-                    st.warning("No usable activity found for the race video with current filters.")
-                    st.session_state.pop('race_video_payload', None)
+                    st.warning(
+                        "No usable activity found for the race video with current filters."
+                    )
+                    st.session_state.pop("race_video_payload", None)
                 else:
                     dims = {
                         "Preview (960x540)": (960, 540),
                         "HD (1280x720)": (1280, 720),
-                        "Full HD (1920x1080)": (1920, 1080)
+                        "Full HD (1920x1080)": (1920, 1080),
                     }
                     width, height = dims[quality]
                     payload = render_contact_race_video(
@@ -1146,43 +1482,58 @@ if 'data' in st.session_state:
                         fps=fps_value,
                         seconds_per_month=seconds_per_month,
                         width=width,
-                        height=height
+                        height=height,
                     )
                     months_span = max(
-                        (rolling_counts.index.max() - rolling_counts.index.min()).total_seconds() / (86400 * 30.4375),
-                        0
+                        (
+                            rolling_counts.index.max() - rolling_counts.index.min()
+                        ).total_seconds()
+                        / (86400 * 30.4375),
+                        0,
                     )
-                    date_fmt = '%Y-%m-%d %H:%M' if bucket_freq != 'D' else '%Y-%m-%d'
-                    payload['date_start'] = rolling_counts.index.min().strftime(date_fmt)
-                    payload['date_end'] = rolling_counts.index.max().strftime(date_fmt)
-                    payload['contacts_count'] = int(rolling_counts.shape[1])
-                    payload['seconds_per_month'] = float(seconds_per_month)
-                    payload['approx_seconds'] = max(months_span * float(seconds_per_month), 8.0) + 0.8
-                    payload['quality'] = quality
-                    payload['fps'] = fps_value
-                    payload['bucket_freq'] = bucket_freq
-                    payload['precision_label'] = "6h sampling + time interpolation" if race_60fps else "Standard daily steps"
-                    payload['count_mode_label'] = (
-                        "Their messages only" if count_mode == 'their_only' else "Chat total (theirs + mine)"
+                    date_fmt = "%Y-%m-%d %H:%M" if bucket_freq != "D" else "%Y-%m-%d"
+                    payload["date_start"] = rolling_counts.index.min().strftime(
+                        date_fmt
                     )
-                    payload['avg_my_msgs'] = bool(average_my_msgs and include_chat_sum)
-                    st.session_state['race_video_payload'] = payload
+                    payload["date_end"] = rolling_counts.index.max().strftime(date_fmt)
+                    payload["contacts_count"] = int(rolling_counts.shape[1])
+                    payload["seconds_per_month"] = float(seconds_per_month)
+                    payload["approx_seconds"] = (
+                        max(months_span * float(seconds_per_month), 8.0) + 0.8
+                    )
+                    payload["quality"] = quality
+                    payload["fps"] = fps_value
+                    payload["bucket_freq"] = bucket_freq
+                    payload["precision_label"] = (
+                        "6h sampling + time interpolation"
+                        if race_60fps
+                        else "Standard daily steps"
+                    )
+                    payload["count_mode_label"] = (
+                        "Their messages only"
+                        if count_mode == "their_only"
+                        else "Chat total (theirs + mine)"
+                    )
+                    payload["avg_my_msgs"] = bool(average_my_msgs and include_chat_sum)
+                    st.session_state["race_video_payload"] = payload
 
-        race_payload = st.session_state.get('race_video_payload')
+        race_payload = st.session_state.get("race_video_payload")
         if race_payload:
-            if race_payload.get('mime') == 'video/mp4':
-                st.video(race_payload['bytes'])
+            if race_payload.get("mime") == "video/mp4":
+                st.video(race_payload["bytes"])
             else:
-                st.image(race_payload['bytes'])
-                if race_payload.get('fallback_reason'):
-                    st.caption(f"MP4 not available, used GIF fallback: {race_payload['fallback_reason']}")
+                st.image(race_payload["bytes"])
+                if race_payload.get("fallback_reason"):
+                    st.caption(
+                        f"MP4 not available, used GIF fallback: {race_payload['fallback_reason']}"
+                    )
 
             st.download_button(
                 "Download Race Video",
-                data=race_payload['bytes'],
-                file_name=race_payload.get('filename', 'contact_race_3month.mp4'),
-                mime=race_payload.get('mime', 'video/mp4'),
-                key="race_video_download"
+                data=race_payload["bytes"],
+                file_name=race_payload.get("filename", "contact_race_3month.mp4"),
+                mime=race_payload.get("mime", "video/mp4"),
+                key="race_video_download",
             )
             st.caption(
                 f"Data range: {race_payload.get('date_start')} to {race_payload.get('date_end')} • "
@@ -1194,204 +1545,356 @@ if 'data' in st.session_state:
                 f"Frames: {race_payload.get('frame_count', 0):,} • "
                 f"Approx length: {race_payload.get('approx_seconds', 0):.1f}s"
             )
-        
-    with tab2:
 
+    with tab2:
         st.header("Behavioral Analysis")
-        
+
         # USE FULL ANALYZER (Includes 'Me') for interactions
         # Because we need to know if 'I' replied or initiated.
         full_analyzer = WhatsappAnalyzer(df_base, use_medians=use_medians)
-        
+
         ghost_thresh = 432000 if use_longer_stats else 86400
         init_thresh = 172800 if use_longer_stats else 21600
-        
+
         col_g, col_i = st.columns(2)
-        
+
         with col_g:
             st.subheader("👻 Top Ghosters (Left you on read)")
-            st.caption(f"Threshold: {ghost_thresh/3600:.1f} hours silence after your last msg.")
-            st.info("ℹ️ 'End of Data' Logic: If a conversation extends to the very end of your message history (e.g. yesterday), it is NOT counted as ghosting.")
-            
+            st.caption(
+                f"Threshold: {ghost_thresh / 3600:.1f} hours silence after your last msg."
+            )
+            st.info(
+                "ℹ️ 'End of Data' Logic: If a conversation extends to the very end of your message history (e.g. yesterday), it is NOT counted as ghosting."
+            )
+
             bhv_exclude = family_list if exclude_family_behavior else None
-            
-            ghosts = full_analyzer.get_ghosting_stats(ghost_thresh, exclude_list=bhv_exclude)
+
+            ghosts = full_analyzer.get_ghosting_stats(
+                ghost_thresh, exclude_list=bhv_exclude
+            )
             if not ghosts.empty:
-                fig_ghost = px.bar(ghosts, x='count', y='contact_name', orientation='h', 
-                                   color='gender', title="Unanswered Threads Count",
-                                   color_discrete_map={'male': '#636EFA', 'female': '#EF553B', 'unknown': 'gray'})
-                fig_ghost.update_layout(yaxis={'categoryorder':'total ascending', 'type': 'category'})
-                st.plotly_chart(fig_ghost, width='stretch')
+                fig_ghost = px.bar(
+                    ghosts,
+                    x="count",
+                    y="contact_name",
+                    orientation="h",
+                    color="gender",
+                    title="Unanswered Threads Count",
+                    color_discrete_map={
+                        "male": "#636EFA",
+                        "female": "#EF553B",
+                        "unknown": "gray",
+                    },
+                )
+                fig_ghost.update_layout(
+                    yaxis={"categoryorder": "total ascending", "type": "category"}
+                )
+                st.plotly_chart(fig_ghost, width="stretch")
             else:
                 st.write("No ghosting detected!")
 
             st.divider()
             st.subheader("😶 People I Ignore (Me → Them)")
-            ignored = full_analyzer.get_left_on_read_stats(ghost_thresh, exclude_list=bhv_exclude)
+            ignored = full_analyzer.get_left_on_read_stats(
+                ghost_thresh, exclude_list=bhv_exclude
+            )
             if not ignored.empty:
                 # ignored is a pivot table with columns like 'True Ghost', 'Left on Delivered', 'Total Ignored'
                 # We can plot 'Total Ignored' or stack the types. Stacked is better.
                 # Reset index to get contact_name as column
                 ignored_reset = ignored.reset_index()
-                cols_to_plot = [c for c in ignored.columns if c in ['True Ghost 👻', 'Left on Delivered 📨']]
-                
-                # Check if ignored is empty (it might have gender but no counts if all 0, but filtering logic in analyzer handles non-empty)
-                
-                # Check for gender column (added in latest update)
-                color_arg = 'gender' if 'gender' in ignored_reset.columns else None
-                color_map = {'male': '#636EFA', 'female': '#EF553B', 'unknown': 'gray'} if color_arg else None
+                cols_to_plot = [
+                    c
+                    for c in ignored.columns
+                    if c in ["True Ghost 👻", "Left on Delivered 📨"]
+                ]
 
-                fig_ignore = px.bar(ignored_reset, x=cols_to_plot, y='contact_name', orientation='h',
-                                    title="Ignored Threads Count",
-                                    color=color_arg, color_discrete_map=color_map)
-                fig_ignore.update_layout(yaxis={'categoryorder':'total ascending', 'type': 'category'}, xaxis_title="Count")
-                st.plotly_chart(fig_ignore, width='stretch')
+                # Check if ignored is empty (it might have gender but no counts if all 0, but filtering logic in analyzer handles non-empty)
+
+                # Check for gender column (added in latest update)
+                color_arg = "gender" if "gender" in ignored_reset.columns else None
+                color_map = (
+                    {"male": "#636EFA", "female": "#EF553B", "unknown": "gray"}
+                    if color_arg
+                    else None
+                )
+
+                fig_ignore = px.bar(
+                    ignored_reset,
+                    x=cols_to_plot,
+                    y="contact_name",
+                    orientation="h",
+                    title="Ignored Threads Count",
+                    color=color_arg,
+                    color_discrete_map=color_map,
+                )
+                fig_ignore.update_layout(
+                    yaxis={"categoryorder": "total ascending", "type": "category"},
+                    xaxis_title="Count",
+                )
+                st.plotly_chart(fig_ignore, width="stretch")
             else:
                 st.write("You reply to everyone 😇")
 
         with col_i:
             st.subheader("👋 Conversation Initiators")
-            st.caption(f"Threshold: {init_thresh/3600:.1f} hours silence.")
-            initiations = full_analyzer.get_initiation_stats(init_thresh, exclude_list=bhv_exclude)
+            st.caption(f"Threshold: {init_thresh / 3600:.1f} hours silence.")
+            initiations = full_analyzer.get_initiation_stats(
+                init_thresh, exclude_list=bhv_exclude
+            )
             if not initiations.empty:
                 # Overall summary stats
-                total_me = initiations['Me'].sum()
-                total_them = initiations['Them'].sum()
+                total_me = initiations["Me"].sum()
+                total_them = initiations["Them"].sum()
                 total_all = total_me + total_them
                 pct_me = (total_me / total_all * 100) if total_all > 0 else 0
                 pct_them = (total_them / total_all * 100) if total_all > 0 else 0
-                
+
                 init_c1, init_c2 = st.columns(2)
-                init_c1.metric("Started by Me", f"{pct_me:.1f}%", help=f"{int(total_me):,} conversations")
-                init_c2.metric("Started by Them", f"{pct_them:.1f}%", help=f"{int(total_them):,} conversations")
-                
-                fig_init = px.bar(initiations[['Me', 'Them']], barmode='group', title="Initiations: Me vs Them")
-                st.plotly_chart(fig_init, width='stretch')
+                init_c1.metric(
+                    "Started by Me",
+                    f"{pct_me:.1f}%",
+                    help=f"{av(int(total_me), _anon_numbers):,} conversations",
+                )
+                init_c2.metric(
+                    "Started by Them",
+                    f"{pct_them:.1f}%",
+                    help=f"{av(int(total_them), _anon_numbers):,} conversations",
+                )
+
+                fig_init = px.bar(
+                    initiations[["Me", "Them"]],
+                    barmode="group",
+                    title="Initiations: Me vs Them",
+                )
+                st.plotly_chart(fig_init, width="stretch")
             else:
                 st.write("Not enough data.")
-            
+
             # First Message Stats (Who broke the ice)
             st.divider()
             st.subheader("🧊 First Message (Who Broke the Ice)")
             st.caption("Who sent the very first message in each chat.")
-            
-            first_me, first_them, total_chats = full_analyzer.get_first_message_stats(exclude_list=bhv_exclude)
-            
+
+            first_me, first_them, total_chats = full_analyzer.get_first_message_stats(
+                exclude_list=bhv_exclude
+            )
+
             if total_chats > 0:
-                pct_first_me = (first_me / total_chats * 100)
-                pct_first_them = (first_them / total_chats * 100)
-                
+                pct_first_me = first_me / total_chats * 100
+                pct_first_them = first_them / total_chats * 100
+
                 first_c1, first_c2 = st.columns(2)
-                first_c1.metric("I Started", f"{pct_first_me:.1f}%", help=f"{first_me:,} of {total_chats:,} chats")
-                first_c2.metric("They Started", f"{pct_first_them:.1f}%", help=f"{first_them:,} of {total_chats:,} chats")
+                first_c1.metric(
+                    "I Started",
+                    f"{pct_first_me:.1f}%",
+                    help=f"{av(first_me, _anon_numbers):,} of {av(total_chats, _anon_numbers):,} chats",
+                )
+                first_c2.metric(
+                    "They Started",
+                    f"{pct_first_them:.1f}%",
+                    help=f"{av(first_them, _anon_numbers):,} of {av(total_chats, _anon_numbers):,} chats",
+                )
             else:
                 st.write("No chat data available.")
-        
+
         st.divider()
         st.subheader("⏱️ Reply Time Rankings (Avg Minutes)")
-        
+
         rc1, rc2 = st.columns(2)
         min_msgs_input = rc1.number_input("Min Messages", min_value=5, value=25, step=5)
         top_30_only = rc2.checkbox("Rank Only Top 30 Contacts", value=True)
-        
+
         st.caption(f"Delays > {reply_threshold_hours}h ignored.")
-        
+
         # We need the FULL transaction history (including ME) to calculate reply times.
         # 'analyzer' uses filtered_df which might exclude 'Me'.
         full_analyzer = WhatsappAnalyzer(df_base, use_medians=use_medians)
-        
-        reply_stats = full_analyzer.get_reply_time_ranking(min_messages=min_msgs_input, max_delay_seconds=reply_threshold_hours*3600, exclude_list=bhv_exclude)
-        
+
+        reply_stats = full_analyzer.get_reply_time_ranking(
+            min_messages=min_msgs_input,
+            max_delay_seconds=reply_threshold_hours * 3600,
+            exclude_list=bhv_exclude,
+        )
+
         if top_30_only and not reply_stats.empty:
             # Get Top 30 names
-            top_30 = analyzer.get_top_talkers(30)['contact_name'].tolist()
-            reply_stats = reply_stats[reply_stats['contact_name'].isin(top_30)]
-        
+            top_30 = analyzer.get_top_talkers(30)["contact_name"].tolist()
+            reply_stats = reply_stats[reply_stats["contact_name"].isin(top_30)]
+
         if not reply_stats.empty:
             rt_col1, rt_col2 = st.columns(2)
-            
+
             # Colors
-            color_map = {'male': '#636EFA', 'female': '#EF553B', 'unknown': 'gray'}
-            
+            color_map = {"male": "#636EFA", "female": "#EF553B", "unknown": "gray"}
+
             with rt_col1:
                 st.write("**Who replies to me the FASTEST?**")
-                fastest_them = reply_stats.nsmallest(8, 'their_avg')
-                fig_ft = px.bar(fastest_them, x='their_avg', y='contact_name', orientation='h', 
-                                color='gender', color_discrete_map=color_map, title="Lowest Avg Reply Time (Them)")
-                fig_ft.update_layout(yaxis={'categoryorder':'total descending', 'type': 'category'}, xaxis_title="Minutes")
-                st.plotly_chart(fig_ft, width='stretch')
-                
+                fastest_them = reply_stats.nsmallest(8, "their_avg")
+                fig_ft = px.bar(
+                    fastest_them,
+                    x="their_avg",
+                    y="contact_name",
+                    orientation="h",
+                    color="gender",
+                    color_discrete_map=color_map,
+                    title="Lowest Avg Reply Time (Them)",
+                )
+                fig_ft.update_layout(
+                    yaxis={"categoryorder": "total descending", "type": "category"},
+                    xaxis_title="Minutes",
+                )
+                st.plotly_chart(fig_ft, width="stretch")
+
                 st.write("**Who replies to me the SLOWEST?**")
-                slowest_them = reply_stats.nlargest(8, 'their_avg')
-                fig_st = px.bar(slowest_them, x='their_avg', y='contact_name', orientation='h', 
-                                color='gender', color_discrete_map=color_map, title="Highest Avg Reply Time (Them)")
-                fig_st.update_layout(yaxis={'categoryorder':'total ascending', 'type': 'category'}, xaxis_title="Minutes")
-                st.plotly_chart(fig_st, width='stretch')
-                
+                slowest_them = reply_stats.nlargest(8, "their_avg")
+                fig_st = px.bar(
+                    slowest_them,
+                    x="their_avg",
+                    y="contact_name",
+                    orientation="h",
+                    color="gender",
+                    color_discrete_map=color_map,
+                    title="Highest Avg Reply Time (Them)",
+                )
+                fig_st.update_layout(
+                    yaxis={"categoryorder": "total ascending", "type": "category"},
+                    xaxis_title="Minutes",
+                )
+                st.plotly_chart(fig_st, width="stretch")
+
             with rt_col2:
                 st.write("**Who do I reply to the FASTEST?**")
-                fastest_me = reply_stats.nsmallest(8, 'my_avg')
-                fig_fm = px.bar(fastest_me, x='my_avg', y='contact_name', orientation='h',
-                                color='gender', color_discrete_map=color_map, title="My Lowest Avg Reply Time")
-                fig_fm.update_layout(yaxis={'categoryorder':'total descending', 'type': 'category'}, xaxis_title="Minutes")
-                st.plotly_chart(fig_fm, width='stretch')
-                
+                fastest_me = reply_stats.nsmallest(8, "my_avg")
+                fig_fm = px.bar(
+                    fastest_me,
+                    x="my_avg",
+                    y="contact_name",
+                    orientation="h",
+                    color="gender",
+                    color_discrete_map=color_map,
+                    title="My Lowest Avg Reply Time",
+                )
+                fig_fm.update_layout(
+                    yaxis={"categoryorder": "total descending", "type": "category"},
+                    xaxis_title="Minutes",
+                )
+                st.plotly_chart(fig_fm, width="stretch")
+
                 st.write("**Who do I reply to the SLOWEST?**")
-                slowest_me = reply_stats.nlargest(8, 'my_avg')
-                fig_sm = px.bar(slowest_me, x='my_avg', y='contact_name', orientation='h',
-                                color='gender', color_discrete_map=color_map, title="My Highest Avg Reply Time")
-                fig_sm.update_layout(yaxis={'categoryorder':'total ascending', 'type': 'category'}, xaxis_title="Minutes")
-                st.plotly_chart(fig_sm, width='stretch')
+                slowest_me = reply_stats.nlargest(8, "my_avg")
+                fig_sm = px.bar(
+                    slowest_me,
+                    x="my_avg",
+                    y="contact_name",
+                    orientation="h",
+                    color="gender",
+                    color_discrete_map=color_map,
+                    title="My Highest Avg Reply Time",
+                )
+                fig_sm.update_layout(
+                    yaxis={"categoryorder": "total ascending", "type": "category"},
+                    xaxis_title="Minutes",
+                )
+                st.plotly_chart(fig_sm, width="stretch")
         else:
-            st.info("Not enough conversation data to calculate reply times (need >25 messages).")
+            st.info(
+                "Not enough conversation data to calculate reply times (need >25 messages)."
+            )
 
         st.divider()
         st.subheader("✍️ Write Time Rankings (Avg Minutes)")
         st.caption("Read receipt -> Send reply. Shows actual typing/composition time.")
-        st.write("*(Note: Requires 'Read Receipts' to be enabled on both ends for accurate data)*")
-        
-        write_stats = full_analyzer.get_write_time_ranking(min_messages=min_msgs_input, max_delay_seconds=10800, exclude_list=bhv_exclude)
-        
+        st.write(
+            "*(Note: Requires 'Read Receipts' to be enabled on both ends for accurate data)*"
+        )
+
+        write_stats = full_analyzer.get_write_time_ranking(
+            min_messages=min_msgs_input,
+            max_delay_seconds=10800,
+            exclude_list=bhv_exclude,
+        )
+
         if top_30_only and not write_stats.empty:
             # Use same top_30 logic
-            top_30 = analyzer.get_top_talkers(30)['contact_name'].tolist()
-            write_stats = write_stats[write_stats['contact_name'].isin(top_30)]
+            top_30 = analyzer.get_top_talkers(30)["contact_name"].tolist()
+            write_stats = write_stats[write_stats["contact_name"].isin(top_30)]
 
         if not write_stats.empty:
             wt_col1, wt_col2 = st.columns(2)
-            
+
             # Colors
-            color_map = {'male': '#636EFA', 'female': '#EF553B', 'unknown': 'gray'}
-            
+            color_map = {"male": "#636EFA", "female": "#EF553B", "unknown": "gray"}
+
             with wt_col1:
                 st.write("**Who takes the SHORTEST to write a reply to me?**")
-                fastest_wt_them = write_stats.nsmallest(8, 'their_avg')
-                fig_fwt = px.bar(fastest_wt_them, x='their_avg', y='contact_name', orientation='h', 
-                                 color='gender', color_discrete_map=color_map, title="Lowest Avg Write Time (Them)")
-                fig_fwt.update_layout(yaxis={'categoryorder':'total descending', 'type': 'category'}, xaxis_title="Minutes")
-                st.plotly_chart(fig_fwt, width='stretch')
-                
+                fastest_wt_them = write_stats.nsmallest(8, "their_avg")
+                fig_fwt = px.bar(
+                    fastest_wt_them,
+                    x="their_avg",
+                    y="contact_name",
+                    orientation="h",
+                    color="gender",
+                    color_discrete_map=color_map,
+                    title="Lowest Avg Write Time (Them)",
+                )
+                fig_fwt.update_layout(
+                    yaxis={"categoryorder": "total descending", "type": "category"},
+                    xaxis_title="Minutes",
+                )
+                st.plotly_chart(fig_fwt, width="stretch")
+
                 st.write("**Who takes the LONGEST to write a reply to me?**")
-                slowest_wt_them = write_stats.nlargest(8, 'their_avg')
-                fig_swt = px.bar(slowest_wt_them, x='their_avg', y='contact_name', orientation='h', 
-                                 color='gender', color_discrete_map=color_map, title="Highest Avg Write Time (Them)")
-                fig_swt.update_layout(yaxis={'categoryorder':'total ascending', 'type': 'category'}, xaxis_title="Minutes")
-                st.plotly_chart(fig_swt, width='stretch')
-                
+                slowest_wt_them = write_stats.nlargest(8, "their_avg")
+                fig_swt = px.bar(
+                    slowest_wt_them,
+                    x="their_avg",
+                    y="contact_name",
+                    orientation="h",
+                    color="gender",
+                    color_discrete_map=color_map,
+                    title="Highest Avg Write Time (Them)",
+                )
+                fig_swt.update_layout(
+                    yaxis={"categoryorder": "total ascending", "type": "category"},
+                    xaxis_title="Minutes",
+                )
+                st.plotly_chart(fig_swt, width="stretch")
+
             with wt_col2:
                 st.write("**Who do I take the SHORTEST to write back to?**")
-                fastest_wt_me = write_stats.nsmallest(8, 'my_avg')
-                fig_fwm = px.bar(fastest_wt_me, x='my_avg', y='contact_name', orientation='h',
-                                 color='gender', color_discrete_map=color_map, title="My Lowest Avg Write Time")
-                fig_fwm.update_layout(yaxis={'categoryorder':'total descending', 'type': 'category'}, xaxis_title="Minutes")
-                st.plotly_chart(fig_fwm, width='stretch')
-                
+                fastest_wt_me = write_stats.nsmallest(8, "my_avg")
+                fig_fwm = px.bar(
+                    fastest_wt_me,
+                    x="my_avg",
+                    y="contact_name",
+                    orientation="h",
+                    color="gender",
+                    color_discrete_map=color_map,
+                    title="My Lowest Avg Write Time",
+                )
+                fig_fwm.update_layout(
+                    yaxis={"categoryorder": "total descending", "type": "category"},
+                    xaxis_title="Minutes",
+                )
+                st.plotly_chart(fig_fwm, width="stretch")
+
                 st.write("**Who do I take the LONGEST to write back to?**")
-                slowest_wt_me = write_stats.nlargest(8, 'my_avg')
-                fig_swm = px.bar(slowest_wt_me, x='my_avg', y='contact_name', orientation='h',
-                                 color='gender', color_discrete_map=color_map, title="My Highest Avg Write Time")
-                fig_swm.update_layout(yaxis={'categoryorder':'total ascending', 'type': 'category'}, xaxis_title="Minutes")
-                st.plotly_chart(fig_swm, width='stretch')
+                slowest_wt_me = write_stats.nlargest(8, "my_avg")
+                fig_swm = px.bar(
+                    slowest_wt_me,
+                    x="my_avg",
+                    y="contact_name",
+                    orientation="h",
+                    color="gender",
+                    color_discrete_map=color_map,
+                    title="My Highest Avg Write Time",
+                )
+                fig_swm.update_layout(
+                    yaxis={"categoryorder": "total ascending", "type": "category"},
+                    xaxis_title="Minutes",
+                )
+                st.plotly_chart(fig_swm, width="stretch")
         else:
             st.info("No write time history found (Receipts might be disabled).")
 
@@ -1400,50 +1903,76 @@ if 'data' in st.session_state:
         # Use full_analyzer to ensure Reply Time calc has 'Me' messages
         # analyze_by_gender() handles 'from_me=0' internally for volume.
         gender_analyzer = WhatsappAnalyzer(df_base, use_medians=use_medians)
-        
+
         if exclude_family_gender and not exclude_family_global and family_list:
-             # Apply family filter to base for gender analysis
-             # Note: df_base includes Me. gender_stats needs Me for reply time.
-             gender_df_source = df_base[~df_base['chat_name'].isin(family_list)]
-             gender_analyzer = WhatsappAnalyzer(gender_df_source)
-        
+            # Apply family filter to base for gender analysis
+            # Note: df_base includes Me. gender_stats needs Me for reply time.
+            gender_df_source = df_base[~df_base["chat_name"].isin(family_list)]
+            gender_analyzer = WhatsappAnalyzer(gender_df_source)
+
         gender_counts = gender_analyzer.analyze_by_gender()
         gender_stats = gender_analyzer.calculate_gender_stats()
-        
+
         c1, c2 = st.columns([1, 2])
         with c1:
-            fig_pie = px.pie(values=gender_counts.values, names=gender_counts.index, 
-                             title="Messages by Gender",
-                             color=gender_counts.index,
-                             color_discrete_map={'male': '#636EFA', 'female': '#EF553B', 'unknown': 'gray'})
-            st.plotly_chart(fig_pie, width='stretch')
+            fig_pie = px.pie(
+                values=gender_counts.values,
+                names=gender_counts.index,
+                title="Messages by Gender",
+                color=gender_counts.index,
+                color_discrete_map={
+                    "male": "#636EFA",
+                    "female": "#EF553B",
+                    "unknown": "gray",
+                },
+            )
+            st.plotly_chart(fig_pie, width="stretch")
         with c2:
             st.subheader("Deep Dive Metrics")
             if not gender_stats.empty:
-                st.dataframe(gender_stats, width='stretch')
-                metrics = ['count', 'avg_wpm', 'media_pct', 'avg_reply_time']
+                st.dataframe(gender_stats, width="stretch")
+                metrics = ["count", "avg_wpm", "media_pct", "avg_reply_time"]
                 metric_choice = st.selectbox("Select Metric", metrics)
-                fig_comp = px.bar(gender_stats, x='gender', y=metric_choice, 
-                                  color='gender', title=f"Comparison: {metric_choice}",
-                                  color_discrete_map={'male': '#636EFA', 'female': '#EF553B', 'unknown': 'gray'})
-                st.plotly_chart(fig_comp, width='stretch')
+                fig_comp = px.bar(
+                    gender_stats,
+                    x="gender",
+                    y=metric_choice,
+                    color="gender",
+                    title=f"Comparison: {metric_choice}",
+                    color_discrete_map={
+                        "male": "#636EFA",
+                        "female": "#EF553B",
+                        "unknown": "gray",
+                    },
+                )
+                st.plotly_chart(fig_comp, width="stretch")
 
     with tab4:
         st.header("Word Cloud")
-        
-        wc_source = st.radio("Source", ["All Messages", "Sent by Me", "Received by Me"], horizontal=True)
-        
+
+        wc_source = st.radio(
+            "Source", ["All Messages", "Sent by Me", "Received by Me"], horizontal=True
+        )
+
         if st.button("Generate Word Cloud"):
             with st.spinner("Generating..."):
                 filter_me = None
-                if wc_source == "Sent by Me": filter_me = True
-                elif wc_source == "Received by Me": filter_me = False
-                
-                text = analyzer.get_wordcloud_text(filter_from_me=filter_me, min_word_length=min_word_len, exclude_emails=exclude_emails)
+                if wc_source == "Sent by Me":
+                    filter_me = True
+                elif wc_source == "Received by Me":
+                    filter_me = False
+
+                text = analyzer.get_wordcloud_text(
+                    filter_from_me=filter_me,
+                    min_word_length=min_word_len,
+                    exclude_emails=exclude_emails,
+                )
                 if text:
-                    wc = WordCloud(width=800, height=400, background_color='white').generate(text)
+                    wc = WordCloud(
+                        width=800, height=400, background_color="white"
+                    ).generate(text)
                     plt.figure(figsize=(10, 5))
-                    plt.imshow(wc, interpolation='bilinear')
+                    plt.imshow(wc, interpolation="bilinear")
                     plt.axis("off")
                     st.pyplot(plt)
                 else:
@@ -1451,138 +1980,207 @@ if 'data' in st.session_state:
 
     with tab5:
         st.header("Chat Explorer & Deep Dive")
-        contacts = sorted(filtered_df['contact_name'].unique().astype(str))
+        contacts = sorted(filtered_df["contact_name"].unique().astype(str))
         selected_contact = st.selectbox("Select Contact", contacts)
-        
+
         if selected_contact:
             # Use df_base (includes 'Me') and filter by chat_name to get the full conversation
-            sub_df = df_base[df_base['chat_name'] == selected_contact].copy()
+            sub_df = df_base[df_base["chat_name"] == selected_contact].copy()
             st.write(f"### Analysis: **{selected_contact}**")
-            
+
             # Breakdown Stats
             total_msgs = len(sub_df)
-            me_rows = sub_df[sub_df['from_me'] == 1]
-            them_rows = sub_df[sub_df['from_me'] == 0]
-            
+            me_rows = sub_df[sub_df["from_me"] == 1]
+            them_rows = sub_df[sub_df["from_me"] == 0]
+
             me_count = len(me_rows)
             them_count = total_msgs - me_count
             me_pct = (me_count / total_msgs * 100) if total_msgs > 0 else 0
             them_pct = (them_count / total_msgs * 100) if total_msgs > 0 else 0
-            
+
             # Word Counts
-            me_words = me_rows['text_data'].fillna('').astype(str).apply(lambda x: len(x.split())).sum()
-            them_words = them_rows['text_data'].fillna('').astype(str).apply(lambda x: len(x.split())).sum()
+            me_words = (
+                me_rows["text_data"]
+                .fillna("")
+                .astype(str)
+                .apply(lambda x: len(x.split()))
+                .sum()
+            )
+            them_words = (
+                them_rows["text_data"]
+                .fillna("")
+                .astype(str)
+                .apply(lambda x: len(x.split()))
+                .sum()
+            )
             total_words = me_words + them_words
             me_word_pct = (me_words / total_words * 100) if total_words > 0 else 0
             them_word_pct = (them_words / total_words * 100) if total_words > 0 else 0
-            
+
             st.markdown(f"""
-            **Messages**: {total_msgs} total
-            - **Me**: {me_count} ({me_pct:.1f}%)
-            - **Them**: {them_count} ({them_pct:.1f}%)
+            **Messages**: {av(total_msgs, _anon_numbers)} total
+            - **Me**: {av(me_count, _anon_numbers)} ({me_pct:.1f}%)
+            - **Them**: {av(them_count, _anon_numbers)} ({them_pct:.1f}%)
             
-            **Words**: {total_words} total
-            - **Me**: {me_words:,} ({me_word_pct:.1f}%)
-            - **Them**: {them_words:,} ({them_word_pct:.1f}%)
+            **Words**: {av(total_words, _anon_numbers)} total
+            - **Me**: {av(me_words, _anon_numbers):,} ({me_word_pct:.1f}%)
+            - **Them**: {av(them_words, _anon_numbers):,} ({them_word_pct:.1f}%)
             """)
-            
+
             # --- Media Pie Chart ---
             st.write("### Message Composition")
-            
+
             # Categorize
             def categorize_msg(row):
-                 mime = str(row.get('mime_type', ''))
-                 if pd.isna(mime) or mime == '' or mime == 'None': return 'Text'
-                 if 'image/webp' in mime: return 'Sticker'
-                 if 'image' in mime: return 'Image'
-                 if 'video' in mime: return 'Video'
-                 if 'audio' in mime: return 'Audio'
-                 return 'Other'
-            
-            sub_df['type_category'] = sub_df.apply(categorize_msg, axis=1)
-            
+                mime = str(row.get("mime_type", ""))
+                if pd.isna(mime) or mime == "" or mime == "None":
+                    return "Text"
+                if "image/webp" in mime:
+                    return "Sticker"
+                if "image" in mime:
+                    return "Image"
+                if "video" in mime:
+                    return "Video"
+                if "audio" in mime:
+                    return "Audio"
+                return "Other"
+
+            sub_df["type_category"] = sub_df.apply(categorize_msg, axis=1)
+
             # Pie Chart Controls
-            hide_text = st.checkbox("Hide 'Text' messages (Focus on Media)", value=False)
-            
+            hide_text = st.checkbox(
+                "Hide 'Text' messages (Focus on Media)", value=False
+            )
+
             # Helper to generate pie data for a subset
             def get_pie_data(df_source, hide_text_flag):
-                 if df_source.empty: return pd.DataFrame()
-                 p_data = df_source['type_category'].value_counts().reset_index()
-                 p_data.columns = ['Type', 'Count']
-                 if hide_text_flag:
-                     p_data = p_data[p_data['Type'] != 'Text']
-                 return p_data
+                if df_source.empty:
+                    return pd.DataFrame()
+                p_data = df_source["type_category"].value_counts().reset_index()
+                p_data.columns = ["Type", "Count"]
+                if hide_text_flag:
+                    p_data = p_data[p_data["Type"] != "Text"]
+                return p_data
 
-            pie_me = get_pie_data(sub_df[sub_df['from_me'] == 1], hide_text)
-            pie_them = get_pie_data(sub_df[sub_df['from_me'] == 0], hide_text)
-            
+            pie_me = get_pie_data(sub_df[sub_df["from_me"] == 1], hide_text)
+            pie_them = get_pie_data(sub_df[sub_df["from_me"] == 0], hide_text)
+
             p1, p2 = st.columns(2)
-            
-            color_map = {'Text': 'lightgray', 'Image': '#636EFA', 'Video': '#EF553B', 'Audio': '#00CC96', 'Sticker': '#AB63FA'}
-            
+
+            color_map = {
+                "Text": "lightgray",
+                "Image": "#636EFA",
+                "Video": "#EF553B",
+                "Audio": "#00CC96",
+                "Sticker": "#AB63FA",
+            }
+
             with p1:
                 if not pie_me.empty:
-                    fig_pie_me = px.pie(pie_me, values='Count', names='Type', title="Me",
-                                     color='Type', color_discrete_map=color_map)
-                    st.plotly_chart(fig_pie_me, width='stretch')
-                else: st.info("No data (Me)")
-                
+                    fig_pie_me = px.pie(
+                        pie_me,
+                        values="Count",
+                        names="Type",
+                        title="Me",
+                        color="Type",
+                        color_discrete_map=color_map,
+                    )
+                    st.plotly_chart(fig_pie_me, width="stretch")
+                else:
+                    st.info("No data (Me)")
+
             with p2:
-                 if not pie_them.empty:
-                    fig_pie_them = px.pie(pie_them, values='Count', names='Type', title="Them",
-                                     color='Type', color_discrete_map=color_map)
-                    st.plotly_chart(fig_pie_them, width='stretch')
-                 else: st.info("No data (Them)")
-            
-            
+                if not pie_them.empty:
+                    fig_pie_them = px.pie(
+                        pie_them,
+                        values="Count",
+                        names="Type",
+                        title="Them",
+                        color="Type",
+                        color_discrete_map=color_map,
+                    )
+                    st.plotly_chart(fig_pie_them, width="stretch")
+                else:
+                    st.info("No data (Them)")
+
             chat_analyzer = WhatsappAnalyzer(sub_df)
             my_reply, their_reply = chat_analyzer.calculate_chat_reply_times()
-            
+
             col_s1, col_s2 = st.columns(2)
-            col_s1.metric("My Avg Reply Time", f"{my_reply:.1f} min")
-            col_s2.metric("Their Avg Reply Time", f"{their_reply:.1f} min")
-            
-            st.caption("ℹ️ **Calculation Method**: Time elapsed between a received message and your first subsequent reply (and vice versa). Does not account for 'Read' time, only delivery/sent timestamps.")
-            
+            col_s1.metric("My Avg Reply Time", f"{av(my_reply, _anon_numbers):.1f} min")
+            col_s2.metric(
+                "Their Avg Reply Time", f"{av(their_reply, _anon_numbers):.1f} min"
+            )
+
+            st.caption(
+                "ℹ️ **Calculation Method**: Time elapsed between a received message and your first subsequent reply (and vice versa). Does not account for 'Read' time, only delivery/sent timestamps."
+            )
+
             # Avg Write Time (Read -> Reply)
             my_write, their_write = chat_analyzer.calculate_chat_write_times()
-            
+
             col_w1, col_w2 = st.columns(2)
-            
+
             w_help = "Time between READING the message (Blue Tick) and SENDING the reply. Replies over 240 minutes are ignored."
-            
+
             # Diagnostics for N/A
-            if 'read_at' in sub_df.columns:
-                has_receipts = sub_df['read_at'].notnull().sum() > 0
-                has_incoming_receipts = sub_df[sub_df['from_me'] == 0]['read_at'].notnull().sum() > 0
-                has_outgoing_receipts = sub_df[sub_df['from_me'] == 1]['read_at'].notnull().sum() > 0
+            if "read_at" in sub_df.columns:
+                has_receipts = sub_df["read_at"].notnull().sum() > 0
+                has_incoming_receipts = (
+                    sub_df[sub_df["from_me"] == 0]["read_at"].notnull().sum() > 0
+                )
+                has_outgoing_receipts = (
+                    sub_df[sub_df["from_me"] == 1]["read_at"].notnull().sum() > 0
+                )
             else:
                 has_receipts = False
                 has_incoming_receipts = False
                 has_outgoing_receipts = False
             if my_write is not None:
-                col_w1.metric("My Avg Write Time", f"{my_write:.1f} min", help=w_help)
+                col_w1.metric(
+                    "My Avg Write Time",
+                    f"{av(my_write, _anon_numbers):.1f} min",
+                    help=w_help,
+                )
             else:
-                reason = "Database missing 'Read' timestamps for incoming messages." if not has_incoming_receipts else "Timestamps exist but no direct reply sequence found."
-                col_w1.metric("My Avg Write Time", "N/A", help=f"Cannot calculate: {reason}")
-                
+                reason = (
+                    "Database missing 'Read' timestamps for incoming messages."
+                    if not has_incoming_receipts
+                    else "Timestamps exist but no direct reply sequence found."
+                )
+                col_w1.metric(
+                    "My Avg Write Time", "N/A", help=f"Cannot calculate: {reason}"
+                )
+
             if their_write is not None:
-                col_w2.metric("Their Avg Write Time", f"{their_write:.1f} min", help=w_help)
+                col_w2.metric(
+                    "Their Avg Write Time",
+                    f"{av(their_write, _anon_numbers):.1f} min",
+                    help=w_help,
+                )
             else:
-                reason = "Contact has Read Receipts DISABLED." if not has_outgoing_receipts else "Read Receipts available but no direct reply sequence found (or system messages interrupted flow)."
-                col_w2.metric("Their Avg Write Time", "N/A", help=f"Cannot calculate: {reason}")
+                reason = (
+                    "Contact has Read Receipts DISABLED."
+                    if not has_outgoing_receipts
+                    else "Read Receipts available but no direct reply sequence found (or system messages interrupted flow)."
+                )
+                col_w2.metric(
+                    "Their Avg Write Time", "N/A", help=f"Cannot calculate: {reason}"
+                )
 
             # Write Time Over Time
             st.write("### Write Time Over Time")
-            wt_over_time = chat_analyzer.calculate_write_time_over_time(max_minutes=240, freq='ME')
+            wt_over_time = chat_analyzer.calculate_write_time_over_time(
+                max_minutes=240, freq="ME"
+            )
             if not wt_over_time.empty:
                 fig_wt = px.line(
                     wt_over_time,
                     x=wt_over_time.index,
                     y=wt_over_time.columns,
                     markers=True,
-                    labels={'value': 'Minutes', 'index': 'Month', 'variable': 'Sender'},
-                    title="Avg Write Time Over Time"
+                    labels={"value": "Minutes", "index": "Month", "variable": "Sender"},
+                    title="Avg Write Time Over Time",
                 )
                 st.plotly_chart(fig_wt, use_container_width=True)
             else:
@@ -1592,195 +2190,274 @@ if 'data' in st.session_state:
             if their_write is None:
                 st.warning("⚠️ Write Time is N/A - Check Debug Info below")
                 with st.expander("Why N/A? (Debug Info)", expanded=True):
-                     st.write(f"Target Chat: '{selected_contact}'")
-                     if 'read_at' not in sub_df.columns:
-                         st.info("No 'read_at' column in this dataset, so read receipts-based stats can't be calculated.")
-                     else:
-                         st.write(f"Incoming Receipts Data Points: {sub_df[sub_df['from_me']==0]['read_at'].notnull().sum()}")
-                         st.write(f"Outgoing Receipts Data Points: {sub_df[sub_df['from_me']==1]['read_at'].notnull().sum()}")
-                         
-                         st.write("Checking Logic...")
-                         try:
-                             # Quick check on raw data
-                             dbg_df = sub_df.sort_values('timestamp').copy()
-                             dbg_df['prev_read'] = dbg_df['read_at'].shift(1)
-                             dbg_df['prev_from'] = dbg_df['from_me'].shift(1)
-                             valid_raw = dbg_df[(dbg_df['from_me']==0) & (dbg_df['prev_from']==1) & (dbg_df['prev_read'].notnull())]
-                             st.write(f"Valid Raw Pairs: {len(valid_raw)}")
-                             if not valid_raw.empty:
-                                 diffs = (valid_raw['timestamp'] - valid_raw['prev_read']).dt.total_seconds()
-                                 st.write("Raw Seconds Stats:")
-                                 st.write(diffs.describe())
-                         except Exception as e:
-                             st.write(f"Debug Error: {e}")
+                    st.write(f"Target Chat: '{selected_contact}'")
+                    if "read_at" not in sub_df.columns:
+                        st.info(
+                            "No 'read_at' column in this dataset, so read receipts-based stats can't be calculated."
+                        )
+                    else:
+                        st.write(
+                            f"Incoming Receipts Data Points: {sub_df[sub_df['from_me'] == 0]['read_at'].notnull().sum()}"
+                        )
+                        st.write(
+                            f"Outgoing Receipts Data Points: {sub_df[sub_df['from_me'] == 1]['read_at'].notnull().sum()}"
+                        )
+
+                        st.write("Checking Logic...")
+                        try:
+                            # Quick check on raw data
+                            dbg_df = sub_df.sort_values("timestamp").copy()
+                            dbg_df["prev_read"] = dbg_df["read_at"].shift(1)
+                            dbg_df["prev_from"] = dbg_df["from_me"].shift(1)
+                            valid_raw = dbg_df[
+                                (dbg_df["from_me"] == 0)
+                                & (dbg_df["prev_from"] == 1)
+                                & (dbg_df["prev_read"].notnull())
+                            ]
+                            st.write(f"Valid Raw Pairs: {len(valid_raw)}")
+                            if not valid_raw.empty:
+                                diffs = (
+                                    valid_raw["timestamp"] - valid_raw["prev_read"]
+                                ).dt.total_seconds()
+                                st.write("Raw Seconds Stats:")
+                                st.write(diffs.describe())
+                        except Exception as e:
+                            st.write(f"Debug Error: {e}")
 
             # --- Advanced Chat Stats --- (Use chat_analyzer for specific context)
             dist_them, _ = chat_analyzer.get_advanced_reply_stats(reply_to=0)
             dist_me, _ = chat_analyzer.get_advanced_reply_stats(reply_to=1)
-            
+
             st.write("### Response Time Analysis")
-            
+
             col_d1, col_d2 = st.columns(2)
-            
+
             with col_d1:
                 st.write("**Their Speed (Them → Me)**")
                 if dist_them is not None and selected_contact in dist_them.index:
                     row = dist_them.loc[selected_contact]
-                    fig_dist = px.bar(x=row.index, y=row.values, labels={'x': 'Time', 'y': 'Count'}, title=f"{selected_contact}'s Speed")
+                    fig_dist = px.bar(
+                        x=row.index,
+                        y=row.values,
+                        labels={"x": "Time", "y": "Count"},
+                        title=f"{selected_contact}'s Speed",
+                    )
                     st.plotly_chart(fig_dist, use_container_width=True)
-                else: st.caption("No data")
-                    
+                else:
+                    st.caption("No data")
+
             with col_d2:
                 st.write("**My Speed (Me → Them)**")
                 if dist_me is not None and selected_contact in dist_me.index:
                     row_me = dist_me.loc[selected_contact]
-                    fig_dist_me = px.bar(x=row_me.index, y=row_me.values, labels={'x': 'Time', 'y': 'Count'}, title="My Speed")
-                    fig_dist_me.update_traces(marker_color='#EF553B')
+                    fig_dist_me = px.bar(
+                        x=row_me.index,
+                        y=row_me.values,
+                        labels={"x": "Time", "y": "Count"},
+                        title="My Speed",
+                    )
+                    fig_dist_me.update_traces(marker_color="#EF553B")
                     st.plotly_chart(fig_dist_me, use_container_width=True)
-                
+
             # Ghosting Control
             st.divider()
-            gh_hours = st.slider("Ghosting Threshold (Hours)", 1, 72, 24, key=f"gh_{selected_contact}")
-            
+            gh_hours = st.slider(
+                "Ghosting Threshold (Hours)", 1, 72, 24, key=f"gh_{selected_contact}"
+            )
+
             # Use FULL Analyzer for specific chat logic (needs Me + Them)
             # Create a dedicated analyzer for this chat using BASE data (includes Me)
             # df_base might contain all chats, so we filter by contact first logic?
             # get_true_ghosting_stats is global but returns per contact.
             # We can use full_analyzer_tab6 (if available globablly? No, it was local to Tab 6).
             # Let's instantiate a specific one or use a global 'full_analyzer' if I make it available.
-            full_chat_df = df_base[df_base['chat_name'] == selected_contact]
+            full_chat_df = df_base[df_base["chat_name"] == selected_contact]
             full_single_analyzer = WhatsappAnalyzer(full_chat_df)
-            
-            true_ghosts = full_single_analyzer.get_true_ghosting_stats(threshold_hours=gh_hours)
-            
+
+            true_ghosts = full_single_analyzer.get_true_ghosting_stats(
+                threshold_hours=gh_hours
+            )
+
             if not true_ghosts.empty:
                 # true_ghosts index is contact_name. Since we filtered to one contact, it should be there.
                 # But get_true_ghosting_stats groups by Chat Name. If contact_name is 'You' for my messages?
                 # No, get_true_ghosting_stats uses 'chat_name' column.
-                
+
                 # Check if selected_contact is in index
                 if selected_contact in true_ghosts.index:
                     st.write(f"**Ghosting Stats (> {gh_hours}h)**")
                     g_row = true_ghosts.loc[selected_contact]
                     cols_g = st.columns(3)
-                    cols_g[0].metric("True Ghosts 👻", int(g_row.get('True Ghost 👻', 0)), help="Read but ignored")
-                    cols_g[1].metric("Left on Delivered 📨", int(g_row.get('Left on Delivered 📨', 0)), help="Never read")
+                    cols_g[0].metric(
+                        "True Ghosts 👻",
+                        av(int(g_row.get("True Ghost 👻", 0)), _anon_numbers),
+                        help="Read but ignored",
+                    )
+                    cols_g[1].metric(
+                        "Left on Delivered 📨",
+                        av(int(g_row.get("Left on Delivered 📨", 0)), _anon_numbers),
+                        help="Never read",
+                    )
                 else:
                     st.info("No ghosting detected with current threshold.")
             else:
                 st.info("No ghosting detected with current threshold.")
-            
+
             st.subheader("Behavioral Timeline")
             # Get behavioral timeline data
             ghost_thresh = 432000 if use_longer_stats else 86400
             init_thresh = 172800 if use_longer_stats else 21600
-            
+
             # Use the FULL SINGLE ANALYZER
-            beh_timeline = full_single_analyzer.get_behavioral_timeline(ghost_thresh, init_thresh)
-            
+            beh_timeline = full_single_analyzer.get_behavioral_timeline(
+                ghost_thresh, init_thresh
+            )
+
             if not beh_timeline.empty:
                 b1, b2 = st.columns(2)
                 with b1:
                     st.caption("Ghosting Over Time")
                     # Ghosted by Them vs Ghosted by Me
-                    fig_g = px.bar(beh_timeline, x=beh_timeline.index, y=['Ghosted by Them', 'Ghosted by Me'], 
-                                   title="Ghosting Incidents", barmode='group')
-                    st.plotly_chart(fig_g, width='stretch')
-                    
+                    fig_g = px.bar(
+                        beh_timeline,
+                        x=beh_timeline.index,
+                        y=["Ghosted by Them", "Ghosted by Me"],
+                        title="Ghosting Incidents",
+                        barmode="group",
+                    )
+                    st.plotly_chart(fig_g, width="stretch")
+
                 with b2:
                     st.caption("Initiations Over Time")
-                    fig_i = px.bar(beh_timeline, x=beh_timeline.index, y=['Initiated by Me', 'Initiated by Them'], 
-                                   title="Conversation Initiations", barmode='group')
-                    st.plotly_chart(fig_i, width='stretch')
+                    fig_i = px.bar(
+                        beh_timeline,
+                        x=beh_timeline.index,
+                        y=["Initiated by Me", "Initiated by Them"],
+                        title="Conversation Initiations",
+                        barmode="group",
+                    )
+                    st.plotly_chart(fig_i, width="stretch")
             else:
                 st.info("No behavioral timeline data available for this selection.")
 
             st.subheader("Activity Analysis")
-            
+
             # Controls for Activity Logic
             c_act1, c_act2 = st.columns([2, 1])
             with c_act1:
-                act_view = st.radio("View Mode", ["Combined", "Split (Me vs Them)", "Only Me", "Only Them"], horizontal=True, key="chat_act_view")
+                act_view = st.radio(
+                    "View Mode",
+                    ["Combined", "Split (Me vs Them)", "Only Me", "Only Them"],
+                    horizontal=True,
+                    key="chat_act_view",
+                )
             with c_act2:
-                chat_show_lines = st.checkbox("Show as Lines", value=False, key="chat_show_lines")
-            
+                chat_show_lines = st.checkbox(
+                    "Show as Lines", value=False, key="chat_show_lines"
+                )
+
             plot_func_chat = px.line if chat_show_lines else px.area
 
             # Monthly Activity
-            monthly_split_arg = 'sender' if act_view != "Combined" else None
-            monthly_chat = chat_analyzer.get_monthly_activity(split_by=monthly_split_arg)
-            
+            monthly_split_arg = "sender" if act_view != "Combined" else None
+            monthly_chat = chat_analyzer.get_monthly_activity(
+                split_by=monthly_split_arg
+            )
+
             # Filter if needed
-            if act_view == "Only Me" and 'Me' in monthly_chat.columns:
-                monthly_chat = monthly_chat[['Me']]
-            elif act_view == "Only Them" and 'Them' in monthly_chat.columns:
-                monthly_chat = monthly_chat[['Them']]
-            
+            if act_view == "Only Me" and "Me" in monthly_chat.columns:
+                monthly_chat = monthly_chat[["Me"]]
+            elif act_view == "Only Them" and "Them" in monthly_chat.columns:
+                monthly_chat = monthly_chat[["Them"]]
+
             if monthly_chat.empty:
                 st.info(f"No monthly data available for view: {act_view}")
             else:
                 if isinstance(monthly_chat, pd.Series) and not monthly_chat.name:
                     monthly_chat.name = "Messages"
-                fig_chat_time = plot_func_chat(monthly_chat, title=f"Message Volume ({act_view})")
-                st.plotly_chart(fig_chat_time, width='stretch')
-            
+                fig_chat_time = plot_func_chat(
+                    monthly_chat, title=f"Message Volume ({act_view})"
+                )
+                st.plotly_chart(fig_chat_time, width="stretch")
+
             # Hourly Activity
-            hourly_split_arg = 'sender' if act_view != "Combined" else None
+            hourly_split_arg = "sender" if act_view != "Combined" else None
             hourly_chat = chat_analyzer.get_hourly_activity(split_by=hourly_split_arg)
-            
+
             if isinstance(hourly_chat, pd.DataFrame):
-                if act_view == "Only Me" and 'Me' in hourly_chat.columns:
-                    hourly_chat = hourly_chat[['Me']]
-                elif act_view == "Only Them" and 'Them' in hourly_chat.columns:
-                    hourly_chat = hourly_chat[['Them']]
-            
+                if act_view == "Only Me" and "Me" in hourly_chat.columns:
+                    hourly_chat = hourly_chat[["Me"]]
+                elif act_view == "Only Them" and "Them" in hourly_chat.columns:
+                    hourly_chat = hourly_chat[["Them"]]
+
             if hourly_chat.empty:
                 st.info(f"No hourly data available for view: {act_view}")
             else:
                 if isinstance(hourly_chat, pd.Series) and not hourly_chat.name:
                     hourly_chat.name = "Messages"
-                fig_chat_hour = px.line(hourly_chat, markers=True, title=f"Hourly Activity ({act_view})")
-                st.plotly_chart(fig_chat_hour, width='stretch')
+                fig_chat_hour = px.line(
+                    hourly_chat, markers=True, title=f"Hourly Activity ({act_view})"
+                )
+                st.plotly_chart(fig_chat_hour, width="stretch")
 
             st.subheader("Word Usage Comparison")
             if st.button("Generate Comparative Word Clouds"):
                 col_wc1, col_wc2 = st.columns(2)
                 with col_wc1:
                     st.caption("My Words")
-                    my_text = chat_analyzer.get_wordcloud_text(filter_from_me=True, min_word_length=min_word_len, exclude_emails=exclude_emails)
+                    my_text = chat_analyzer.get_wordcloud_text(
+                        filter_from_me=True,
+                        min_word_length=min_word_len,
+                        exclude_emails=exclude_emails,
+                    )
                     if my_text:
-                        wc1 = WordCloud(width=400, height=300, background_color='white').generate(my_text)
-                        plt.figure(figsize=(5,4))
+                        wc1 = WordCloud(
+                            width=400, height=300, background_color="white"
+                        ).generate(my_text)
+                        plt.figure(figsize=(5, 4))
                         plt.imshow(wc1)
-                        plt.axis('off')
+                        plt.axis("off")
                         st.pyplot(plt)
-                    else: st.write("No data.")
-                        
+                    else:
+                        st.write("No data.")
+
                 with col_wc2:
                     st.caption(f"{selected_contact}'s Words")
-                    their_text = chat_analyzer.get_wordcloud_text(filter_from_me=False, min_word_length=min_word_len, exclude_emails=exclude_emails)
+                    their_text = chat_analyzer.get_wordcloud_text(
+                        filter_from_me=False,
+                        min_word_length=min_word_len,
+                        exclude_emails=exclude_emails,
+                    )
                     if their_text:
-                        wc2 = WordCloud(width=400, height=300, background_color='white').generate(their_text)
-                        plt.figure(figsize=(5,4))
+                        wc2 = WordCloud(
+                            width=400, height=300, background_color="white"
+                        ).generate(their_text)
+                        plt.figure(figsize=(5, 4))
                         plt.imshow(wc2)
-                        plt.axis('off')
+                        plt.axis("off")
                         st.pyplot(plt)
-                    else: st.write("No data.")
- 
+                    else:
+                        st.write("No data.")
+
             st.write("Recent Messages:")
-            cols_to_show = ['timestamp', 'from_me', 'text_data']
-            if 'mime_type' in sub_df.columns: cols_to_show.append('mime_type')
-            st.dataframe(sub_df[cols_to_show].sort_values('timestamp', ascending=False).head(10))
+            cols_to_show = ["timestamp", "from_me", "text_data"]
+            if "mime_type" in sub_df.columns:
+                cols_to_show.append("mime_type")
+            st.dataframe(
+                sub_df[cols_to_show].sort_values("timestamp", ascending=False).head(10)
+            )
 
     with tab6:
         st.header("👥 Group Explorer & Member Comparison")
-        st.caption("Deep dive into group dynamics, member activity, reply speed, and read behavior.")
+        st.caption(
+            "Deep dive into group dynamics, member activity, reply speed, and read behavior."
+        )
 
-        if 'is_group' not in df_group_base.columns:
+        if "is_group" not in df_group_base.columns:
             st.info("Group metadata is unavailable in this dataset.")
         else:
-            groups_df = df_group_base[df_group_base['is_group'] == True].copy()
-            groups_df = groups_df[groups_df['chat_name'].notnull()]
+            groups_df = df_group_base[df_group_base["is_group"] == True].copy()
+            groups_df = groups_df[groups_df["chat_name"].notnull()]
             lid_to_pn_map = load_lid_jid_map(msgstore_path)
             jid_raw_lookup = load_jid_raw_lookup(msgstore_path)
             vcf_contact_lookup = load_vcf_contact_lookup(vcf_path)
@@ -1791,265 +2468,446 @@ if 'data' in st.session_state:
             if groups_df.empty:
                 st.info("No groups found with current filters.")
             else:
-                group_options = sorted(groups_df['chat_name'].astype(str).unique().tolist())
-                selected_group = st.selectbox("Select Group", group_options, key="grp_selected_group")
+                group_options = sorted(
+                    groups_df["chat_name"].astype(str).unique().tolist()
+                )
+                selected_group = st.selectbox(
+                    "Select Group", group_options, key="grp_selected_group"
+                )
 
                 if selected_group:
-                    gdf = groups_df[groups_df['chat_name'] == selected_group].copy().sort_values('timestamp')
+                    gdf = (
+                        groups_df[groups_df["chat_name"] == selected_group]
+                        .copy()
+                        .sort_values("timestamp")
+                    )
 
                     if gdf.empty:
                         st.info("No data for this group with current filters.")
                     else:
-                        if 'read_at' not in gdf.columns:
-                            gdf['read_at'] = pd.NaT
+                        if "read_at" not in gdf.columns:
+                            gdf["read_at"] = pd.NaT
 
                         # Canonicalize participants with LID -> PN mapping to avoid split identities
-                        gdf['sender_jid_num'] = pd.to_numeric(gdf['sender_jid_row_id'], errors='coerce')
-                        gdf['canonical_sender_id'] = gdf['sender_jid_num']
+                        gdf["sender_jid_num"] = pd.to_numeric(
+                            gdf["sender_jid_row_id"], errors="coerce"
+                        )
+                        gdf["canonical_sender_id"] = gdf["sender_jid_num"]
                         if lid_to_pn_map:
                             mapped_ids = (
-                                gdf['sender_jid_num']
-                                .astype('Int64')
-                                .map(lid_to_pn_map)
+                                gdf["sender_jid_num"].astype("Int64").map(lid_to_pn_map)
                             )
-                            gdf['canonical_sender_id'] = mapped_ids.fillna(gdf['sender_jid_num'])
+                            gdf["canonical_sender_id"] = mapped_ids.fillna(
+                                gdf["sender_jid_num"]
+                            )
 
-                        gdf.loc[gdf['from_me'] == 1, 'canonical_sender_id'] = -1
+                        gdf.loc[gdf["from_me"] == 1, "canonical_sender_id"] = -1
 
                         # Pick best display label per canonical ID.
                         def _label_has_letters(x):
-                            return bool(re.search(r'[A-Za-zÀ-ÿ]', str(x)))
+                            return bool(re.search(r"[A-Za-zÀ-ÿ]", str(x)))
 
-                        inbound = gdf[gdf['from_me'] == 0][['canonical_sender_id', 'contact_name', 'sender_string']].copy()
-                        inbound['candidate_name'] = inbound['contact_name'].fillna('').astype(str).str.strip()
-                        inbound.loc[inbound['candidate_name'].eq(''), 'candidate_name'] = inbound['sender_string'].fillna('').astype(str)
-                        inbound['has_letters'] = inbound['candidate_name'].apply(_label_has_letters)
-                        inbound['is_unknown'] = inbound['candidate_name'].str.lower().isin(['', 'unknown', 'none', 'nan'])
+                        inbound = gdf[gdf["from_me"] == 0][
+                            ["canonical_sender_id", "contact_name", "sender_string"]
+                        ].copy()
+                        inbound["candidate_name"] = (
+                            inbound["contact_name"].fillna("").astype(str).str.strip()
+                        )
+                        inbound.loc[
+                            inbound["candidate_name"].eq(""), "candidate_name"
+                        ] = inbound["sender_string"].fillna("").astype(str)
+                        inbound["has_letters"] = inbound["candidate_name"].apply(
+                            _label_has_letters
+                        )
+                        inbound["is_unknown"] = (
+                            inbound["candidate_name"]
+                            .str.lower()
+                            .isin(["", "unknown", "none", "nan"])
+                        )
 
                         label_counts = (
-                            inbound.groupby(['canonical_sender_id', 'candidate_name', 'has_letters', 'is_unknown'])
+                            inbound.groupby(
+                                [
+                                    "canonical_sender_id",
+                                    "candidate_name",
+                                    "has_letters",
+                                    "is_unknown",
+                                ]
+                            )
                             .size()
-                            .reset_index(name='count')
+                            .reset_index(name="count")
                             .sort_values(
-                                ['canonical_sender_id', 'has_letters', 'is_unknown', 'count'],
-                                ascending=[True, False, True, False]
+                                [
+                                    "canonical_sender_id",
+                                    "has_letters",
+                                    "is_unknown",
+                                    "count",
+                                ],
+                                ascending=[True, False, True, False],
                             )
                         )
                         preferred_labels = (
-                            label_counts.drop_duplicates(subset=['canonical_sender_id'], keep='first')
-                            .set_index('canonical_sender_id')['candidate_name']
+                            label_counts.drop_duplicates(
+                                subset=["canonical_sender_id"], keep="first"
+                            )
+                            .set_index("canonical_sender_id")["candidate_name"]
                             .to_dict()
                         )
 
                         # Improve unresolved labels:
                         # 1) try global non-numeric name evidence across dataset for mapped ids
                         # 2) fallback to mapped phone JID user part
-                        canonical_ids = [int(x) for x in gdf['canonical_sender_id'].dropna().unique() if int(x) != -1]
+                        canonical_ids = [
+                            int(x)
+                            for x in gdf["canonical_sender_id"].dropna().unique()
+                            if int(x) != -1
+                        ]
                         for cid in canonical_ids:
-                            current = str(preferred_labels.get(cid, '') or '').strip()
-                            needs_improve = (not current) or (current.lower() in {'unknown', 'none', 'nan'}) or current.isdigit()
+                            current = str(preferred_labels.get(cid, "") or "").strip()
+                            needs_improve = (
+                                (not current)
+                                or (current.lower() in {"unknown", "none", "nan"})
+                                or current.isdigit()
+                            )
                             if not needs_improve:
                                 continue
 
                             related_ids = [cid] + lids_by_pn.get(cid, [])
                             global_rows = df_group_base[
-                                (df_group_base['from_me'] == 0) &
-                                (pd.to_numeric(df_group_base['sender_jid_row_id'], errors='coerce').isin(related_ids))
+                                (df_group_base["from_me"] == 0)
+                                & (
+                                    pd.to_numeric(
+                                        df_group_base["sender_jid_row_id"],
+                                        errors="coerce",
+                                    ).isin(related_ids)
+                                )
                             ].copy()
 
                             if not global_rows.empty:
-                                cand = global_rows['contact_name'].fillna('').astype(str).str.strip()
+                                cand = (
+                                    global_rows["contact_name"]
+                                    .fillna("")
+                                    .astype(str)
+                                    .str.strip()
+                                )
                                 cand = cand[
-                                    cand.ne('') &
-                                    (~cand.str.lower().isin(['unknown', 'none', 'nan'])) &
-                                    (cand.str.contains(r'[A-Za-zÀ-ÿ]', regex=True))
+                                    cand.ne("")
+                                    & (
+                                        ~cand.str.lower().isin(
+                                            ["unknown", "none", "nan"]
+                                        )
+                                    )
+                                    & (cand.str.contains(r"[A-Za-zÀ-ÿ]", regex=True))
                                 ]
                                 if not cand.empty:
                                     best = cand.value_counts().index[0]
                                     preferred_labels[cid] = best
                                     continue
 
-                            pn_raw = jid_raw_lookup.get(cid, '')
+                            pn_raw = jid_raw_lookup.get(cid, "")
                             if pn_raw:
-                                phone_part = str(pn_raw).split('@')[0]
+                                phone_part = str(pn_raw).split("@")[0]
                                 digits = "".join(filter(str.isdigit, phone_part))
                                 if digits in vcf_contact_lookup:
                                     preferred_labels[cid] = vcf_contact_lookup[digits]
-                                elif len(digits) > 9 and digits[-9:] in vcf_contact_lookup:
-                                    preferred_labels[cid] = vcf_contact_lookup[digits[-9:]]
+                                elif (
+                                    len(digits) > 9
+                                    and digits[-9:] in vcf_contact_lookup
+                                ):
+                                    preferred_labels[cid] = vcf_contact_lookup[
+                                        digits[-9:]
+                                    ]
                                 else:
                                     preferred_labels[cid] = phone_part
 
-                        gdf['sender_label'] = gdf['canonical_sender_id'].map(preferred_labels)
-                        gdf.loc[gdf['from_me'] == 1, 'sender_label'] = 'You'
-                        missing_label = gdf['sender_label'].isna()
-                        gdf.loc[missing_label, 'sender_label'] = (
-                            gdf.loc[missing_label, 'contact_name']
-                            .fillna(gdf.loc[missing_label, 'sender_string'])
-                            .fillna('Unknown')
+                        gdf["sender_label"] = gdf["canonical_sender_id"].map(
+                            preferred_labels
+                        )
+                        gdf.loc[gdf["from_me"] == 1, "sender_label"] = "You"
+                        missing_label = gdf["sender_label"].isna()
+                        gdf.loc[missing_label, "sender_label"] = (
+                            gdf.loc[missing_label, "contact_name"]
+                            .fillna(gdf.loc[missing_label, "sender_string"])
+                            .fillna("Unknown")
                             .astype(str)
                         )
-                        gdf['sender_label'] = gdf['sender_label'].str.replace(r'@lid$', '', regex=True)
-                        gdf['sender_label'] = gdf['sender_label'].str.replace(r'@s\\.whatsapp\\.net$', '', regex=True)
-                        gdf['sender_label'] = gdf['sender_label'].astype(str)
-                        gdf['word_count'] = gdf['text_data'].fillna('').astype(str).str.split().str.len()
+                        gdf["sender_label"] = gdf["sender_label"].str.replace(
+                            r"@lid$", "", regex=True
+                        )
+                        gdf["sender_label"] = gdf["sender_label"].str.replace(
+                            r"@s\\.whatsapp\\.net$", "", regex=True
+                        )
+                        gdf["sender_label"] = gdf["sender_label"].astype(str)
+                        if _anon_key != "off":
+                            _anon_fn_grp = {
+                                "hash": _anon_hash,
+                                "hash_cut": _anon_hash_cut,
+                                "random": _anon_random,
+                            }[_anon_key]
+                            gdf["sender_label"] = gdf["sender_label"].map(
+                                lambda v: v if v == "You" else _anon_fn_grp(str(v))
+                            )
+                        gdf["word_count"] = (
+                            gdf["text_data"]
+                            .fillna("")
+                            .astype(str)
+                            .str.split()
+                            .str.len()
+                        )
 
-                        participants = sorted(gdf[gdf['sender_label'] != 'You']['sender_label'].unique().tolist())
-                        active_days = gdf['timestamp'].dt.date.nunique()
+                        participants = sorted(
+                            gdf[gdf["sender_label"] != "You"]["sender_label"]
+                            .unique()
+                            .tolist()
+                        )
+                        active_days = gdf["timestamp"].dt.date.nunique()
                         total_msgs = len(gdf)
-                        total_words = int(gdf['word_count'].sum())
-                        my_msgs = int((gdf['sender_label'] == 'You').sum())
+                        total_words = int(gdf["word_count"].sum())
+                        my_msgs = int((gdf["sender_label"] == "You").sum())
                         my_share = (my_msgs / total_msgs * 100) if total_msgs > 0 else 0
 
                         m1, m2, m3, m4, m5 = st.columns(5)
-                        m1.metric("Group Messages", f"{total_msgs:,}")
+                        m1.metric(
+                            "Group Messages", f"{av(total_msgs, _anon_numbers):,}"
+                        )
                         m2.metric("Participants", f"{len(participants):,}")
-                        m3.metric("Active Days", f"{active_days:,}")
-                        m4.metric("My Messages", f"{my_msgs:,}")
+                        m3.metric("Active Days", f"{av(active_days, _anon_numbers):,}")
+                        m4.metric("My Messages", f"{av(my_msgs, _anon_numbers):,}")
                         m5.metric("My Share", f"{my_share:.1f}%")
 
                         cfg1, cfg2, cfg3, cfg4 = st.columns(4)
-                        top_members_n = cfg1.slider("Top Members", 3, 25, 10, key="grp_top_members_n")
-                        grp_reply_thresh_h = cfg2.slider("Max Reply Delay (hours)", 1, 72, 12, key="grp_reply_thresh_h")
-                        grp_show_lines = cfg3.checkbox("Show as Lines", value=True, key="grp_show_lines")
-                        grp_show_cumulative = cfg4.checkbox("Show Cumulative", value=False, key="grp_show_cumulative")
+                        top_members_n = cfg1.slider(
+                            "Top Members", 3, 25, 10, key="grp_top_members_n"
+                        )
+                        grp_reply_thresh_h = cfg2.slider(
+                            "Max Reply Delay (hours)",
+                            1,
+                            72,
+                            12,
+                            key="grp_reply_thresh_h",
+                        )
+                        grp_show_lines = cfg3.checkbox(
+                            "Show as Lines", value=True, key="grp_show_lines"
+                        )
+                        grp_show_cumulative = cfg4.checkbox(
+                            "Show Cumulative", value=False, key="grp_show_cumulative"
+                        )
 
                         # ---- Member Rankings ----
-                        member_msg = gdf['sender_label'].value_counts().rename('Messages')
-                        member_words = gdf.groupby('sender_label')['word_count'].sum().rename('Words')
-                        avg_words = gdf.groupby('sender_label')['word_count'].mean().rename('Avg Words/Msg')
+                        member_msg = (
+                            gdf["sender_label"].value_counts().rename("Messages")
+                        )
+                        member_words = (
+                            gdf.groupby("sender_label")["word_count"]
+                            .sum()
+                            .rename("Words")
+                        )
+                        avg_words = (
+                            gdf.groupby("sender_label")["word_count"]
+                            .mean()
+                            .rename("Avg Words/Msg")
+                        )
 
                         # Reply speed: member replies after someone else in the same group.
-                        gdf['prev_sender'] = gdf['sender_label'].shift(1)
-                        gdf['prev_timestamp'] = gdf['timestamp'].shift(1)
-                        gdf['reply_seconds'] = (gdf['timestamp'] - gdf['prev_timestamp']).dt.total_seconds()
+                        gdf["prev_sender"] = gdf["sender_label"].shift(1)
+                        gdf["prev_timestamp"] = gdf["timestamp"].shift(1)
+                        gdf["reply_seconds"] = (
+                            gdf["timestamp"] - gdf["prev_timestamp"]
+                        ).dt.total_seconds()
 
                         reply_mask = (
-                            (gdf['sender_label'] != gdf['prev_sender']) &
-                            (gdf['reply_seconds'] >= 0) &
-                            (gdf['reply_seconds'] <= grp_reply_thresh_h * 3600)
+                            (gdf["sender_label"] != gdf["prev_sender"])
+                            & (gdf["reply_seconds"] >= 0)
+                            & (gdf["reply_seconds"] <= grp_reply_thresh_h * 3600)
                         )
                         reply_df = gdf[reply_mask].copy()
-                        reply_avg = (reply_df.groupby('sender_label')['reply_seconds'].mean() / 60).rename('Avg Reply (min)')
-                        reply_events = reply_df.groupby('sender_label').size().rename('Reply Events')
+                        reply_avg = (
+                            reply_df.groupby("sender_label")["reply_seconds"].mean()
+                            / 60
+                        ).rename("Avg Reply (min)")
+                        reply_events = (
+                            reply_df.groupby("sender_label")
+                            .size()
+                            .rename("Reply Events")
+                        )
 
                         # How long I take to read each member's messages.
-                        read_delay_df = gdf[(gdf['sender_label'] != 'You') & gdf['read_at'].notnull()].copy()
-                        read_delay_df['my_read_seconds'] = (read_delay_df['read_at'] - read_delay_df['timestamp']).dt.total_seconds()
-                        read_delay_df.loc[read_delay_df['my_read_seconds'].between(-60, 0), 'my_read_seconds'] = 0
+                        read_delay_df = gdf[
+                            (gdf["sender_label"] != "You") & gdf["read_at"].notnull()
+                        ].copy()
+                        read_delay_df["my_read_seconds"] = (
+                            read_delay_df["read_at"] - read_delay_df["timestamp"]
+                        ).dt.total_seconds()
+                        read_delay_df.loc[
+                            read_delay_df["my_read_seconds"].between(-60, 0),
+                            "my_read_seconds",
+                        ] = 0
                         read_delay_df = read_delay_df[
-                            (read_delay_df['my_read_seconds'] >= 0) &
-                            (read_delay_df['my_read_seconds'] <= 7 * 24 * 3600)
+                            (read_delay_df["my_read_seconds"] >= 0)
+                            & (read_delay_df["my_read_seconds"] <= 7 * 24 * 3600)
                         ]
-                        my_read_avg = (read_delay_df.groupby('sender_label')['my_read_seconds'].mean() / 60).rename('Avg My Read (min)')
+                        my_read_avg = (
+                            read_delay_df.groupby("sender_label")[
+                                "my_read_seconds"
+                            ].mean()
+                            / 60
+                        ).rename("Avg My Read (min)")
 
                         # How long each member takes to read MY group messages (per-recipient receipts).
-                        group_jids = gdf['raw_string'].dropna().astype(str)
+                        group_jids = gdf["raw_string"].dropna().astype(str)
                         group_jid = group_jids.iloc[0] if not group_jids.empty else None
-                        receipt_events = load_group_receipt_events(msgstore_path, group_jid)
+                        receipt_events = load_group_receipt_events(
+                            msgstore_path, group_jid
+                        )
 
-                        member_read_avg = pd.Series(dtype='float64')
-                        member_read_events = pd.Series(dtype='int64')
+                        member_read_avg = pd.Series(dtype="float64")
+                        member_read_events = pd.Series(dtype="int64")
                         if not receipt_events.empty:
                             jid_to_name = (
-                                gdf[['sender_string', 'sender_label']]
-                                .dropna(subset=['sender_string', 'sender_label'])
-                                .drop_duplicates('sender_string')
-                                .set_index('sender_string')['sender_label']
+                                gdf[["sender_string", "sender_label"]]
+                                .dropna(subset=["sender_string", "sender_label"])
+                                .drop_duplicates("sender_string")
+                                .set_index("sender_string")["sender_label"]
                                 .to_dict()
                             )
 
                             receipt_events = receipt_events.copy()
-                            receipt_events['member'] = receipt_events['reader_jid'].map(jid_to_name)
-                            missing_mask = receipt_events['member'].isna()
-                            receipt_events.loc[missing_mask, 'member'] = (
-                                receipt_events.loc[missing_mask, 'reader_jid']
+                            receipt_events["member"] = receipt_events["reader_jid"].map(
+                                jid_to_name
+                            )
+                            missing_mask = receipt_events["member"].isna()
+                            _fallback_labels = (
+                                receipt_events.loc[missing_mask, "reader_jid"]
                                 .astype(str)
-                                .str.split('@')
+                                .str.split("@")
                                 .str[0]
                             )
+                            if _anon_key != "off":
+                                _anon_fn_rcpt = {
+                                    "hash": _anon_hash,
+                                    "hash_cut": _anon_hash_cut,
+                                    "random": _anon_random,
+                                }[_anon_key]
+                                _fallback_labels = _fallback_labels.map(
+                                    lambda v: _anon_fn_rcpt(str(v))
+                                )
+                            receipt_events.loc[missing_mask, "member"] = (
+                                _fallback_labels
+                            )
 
-                            receipt_events['their_read_seconds'] = (
-                                receipt_events['read_timestamp'] - receipt_events['msg_timestamp']
+                            receipt_events["their_read_seconds"] = (
+                                receipt_events["read_timestamp"]
+                                - receipt_events["msg_timestamp"]
                             ).dt.total_seconds()
                             receipt_events.loc[
-                                receipt_events['their_read_seconds'].between(-60, 0), 'their_read_seconds'
+                                receipt_events["their_read_seconds"].between(-60, 0),
+                                "their_read_seconds",
                             ] = 0
                             receipt_events = receipt_events[
-                                (receipt_events['their_read_seconds'] >= 0) &
-                                (receipt_events['their_read_seconds'] <= 7 * 24 * 3600)
+                                (receipt_events["their_read_seconds"] >= 0)
+                                & (
+                                    receipt_events["their_read_seconds"]
+                                    <= 7 * 24 * 3600
+                                )
                             ]
-                            receipt_events = receipt_events[receipt_events['member'].astype(str) != 'You']
+                            receipt_events = receipt_events[
+                                receipt_events["member"].astype(str) != "You"
+                            ]
 
                             member_read_avg = (
-                                receipt_events.groupby('member')['their_read_seconds'].mean() / 60
-                            ).rename('Avg Their Read (min)')
-                            member_read_events = receipt_events.groupby('member').size().rename('Read Events')
+                                receipt_events.groupby("member")[
+                                    "their_read_seconds"
+                                ].mean()
+                                / 60
+                            ).rename("Avg Their Read (min)")
+                            member_read_events = (
+                                receipt_events.groupby("member")
+                                .size()
+                                .rename("Read Events")
+                            )
 
-                        rankings = pd.DataFrame({'Messages': member_msg})
-                        rankings = rankings.join(member_words, how='left')
-                        rankings = rankings.join(avg_words, how='left')
-                        rankings = rankings.join(reply_avg, how='left')
-                        rankings = rankings.join(reply_events, how='left')
-                        rankings = rankings.join(my_read_avg, how='left')
+                        rankings = pd.DataFrame({"Messages": member_msg})
+                        rankings = rankings.join(member_words, how="left")
+                        rankings = rankings.join(avg_words, how="left")
+                        rankings = rankings.join(reply_avg, how="left")
+                        rankings = rankings.join(reply_events, how="left")
+                        rankings = rankings.join(my_read_avg, how="left")
                         if not member_read_avg.empty:
-                            rankings = rankings.join(member_read_avg, how='left')
-                            rankings = rankings.join(member_read_events, how='left')
+                            rankings = rankings.join(member_read_avg, how="left")
+                            rankings = rankings.join(member_read_events, how="left")
                         else:
-                            rankings['Avg Their Read (min)'] = np.nan
-                            rankings['Read Events'] = 0
+                            rankings["Avg Their Read (min)"] = np.nan
+                            rankings["Read Events"] = 0
 
-                        rankings['Message Share %'] = (rankings['Messages'] / total_msgs * 100).round(2)
-                        rankings['Word Share %'] = (rankings['Words'] / max(total_words, 1) * 100).round(2)
-                        rankings = rankings.fillna({
-                            'Words': 0,
-                            'Avg Words/Msg': 0,
-                            'Avg Reply (min)': np.nan,
-                            'Reply Events': 0,
-                            'Avg My Read (min)': np.nan,
-                            'Avg Their Read (min)': np.nan,
-                            'Read Events': 0
-                        })
-                        rankings = rankings.sort_values('Messages', ascending=False)
+                        rankings["Message Share %"] = (
+                            rankings["Messages"] / total_msgs * 100
+                        ).round(2)
+                        rankings["Word Share %"] = (
+                            rankings["Words"] / max(total_words, 1) * 100
+                        ).round(2)
+                        rankings = rankings.fillna(
+                            {
+                                "Words": 0,
+                                "Avg Words/Msg": 0,
+                                "Avg Reply (min)": np.nan,
+                                "Reply Events": 0,
+                                "Avg My Read (min)": np.nan,
+                                "Avg Their Read (min)": np.nan,
+                                "Read Events": 0,
+                            }
+                        )
+                        rankings = rankings.sort_values("Messages", ascending=False)
                         rankings.index = rankings.index.map(str)
-                        rankings.index.name = 'sender_label'
+                        rankings.index.name = "sender_label"
 
-                        unresolved_ids = [m for m in rankings.index.tolist() if str(m).isdigit()]
+                        unresolved_ids = [
+                            m for m in rankings.index.tolist() if str(m).isdigit()
+                        ]
                         if unresolved_ids:
-                            st.caption("Some members appear as numeric IDs (WhatsApp LID/contact-mapping limitation in backup data).")
+                            st.caption(
+                                "Some members appear as numeric IDs (WhatsApp LID/contact-mapping limitation in backup data)."
+                            )
 
                         st.subheader("🏅 Member Rankings")
-                        st.caption("Includes message/word share, reply speed, and read-time metrics.")
+                        st.caption(
+                            "Includes message/word share, reply speed, and read-time metrics."
+                        )
                         st.dataframe(rankings, use_container_width=True)
 
                         # ---- Activity Comparison Over Time ----
                         st.subheader("📈 Member Activity Over Time")
-                        recent_cutoff = gdf['timestamp'].max() - pd.DateOffset(months=6)
-                        recent_activity = (
-                            gdf[gdf['timestamp'] >= recent_cutoff]['sender_label']
-                            .value_counts()
-                        )
-                        recent_default = recent_activity.head(top_members_n).index.tolist()
-                        if 'You' in rankings.index and 'You' not in recent_default:
-                            recent_default = ['You'] + recent_default
+                        recent_cutoff = gdf["timestamp"].max() - pd.DateOffset(months=6)
+                        recent_activity = gdf[gdf["timestamp"] >= recent_cutoff][
+                            "sender_label"
+                        ].value_counts()
+                        recent_default = recent_activity.head(
+                            top_members_n
+                        ).index.tolist()
+                        if "You" in rankings.index and "You" not in recent_default:
+                            recent_default = ["You"] + recent_default
                         all_members = rankings.index.tolist()
 
                         selected_timeline_members = st.multiselect(
                             "Members to Plot",
                             all_members,
-                            default=recent_default[:min(len(recent_default), len(all_members))],
-                            key="grp_timeline_members"
+                            default=recent_default[
+                                : min(len(recent_default), len(all_members))
+                            ],
+                            key="grp_timeline_members",
                         )
 
                         if not selected_timeline_members:
-                            selected_timeline_members = rankings.head(top_members_n).index.tolist()
+                            selected_timeline_members = rankings.head(
+                                top_members_n
+                            ).index.tolist()
 
-                        timeline_df = gdf[gdf['sender_label'].isin(selected_timeline_members)].copy()
+                        timeline_df = gdf[
+                            gdf["sender_label"].isin(selected_timeline_members)
+                        ].copy()
                         timeline = (
-                            timeline_df
-                            .set_index('timestamp')
-                            .groupby('sender_label')
-                            .resample('ME')
+                            timeline_df.set_index("timestamp")
+                            .groupby("sender_label")
+                            .resample("ME")
                             .size()
                             .unstack(level=0)
                             .fillna(0)
@@ -2064,16 +2922,30 @@ if 'data' in st.session_state:
                                 x=timeline.index,
                                 y=timeline.columns,
                                 title=f"Monthly Volume by Member ({'Cumulative' if grp_show_cumulative else 'Monthly'})",
-                                labels={'value': 'Messages', 'index': 'Month', 'variable': 'Member'}
+                                labels={
+                                    "value": "Messages",
+                                    "index": "Month",
+                                    "variable": "Member",
+                                },
                             )
-                            st.plotly_chart(fig_group_timeline, width='stretch')
+                            st.plotly_chart(fig_group_timeline, width="stretch")
                         else:
-                            st.info("Not enough data to plot member activity over time.")
+                            st.info(
+                                "Not enough data to plot member activity over time."
+                            )
 
                         # ---- Hourly Comparison ----
                         st.subheader("🕒 Hourly Member Activity")
-                        hourly_df = gdf[gdf['sender_label'].isin(selected_timeline_members)].copy()
-                        hourly = hourly_df.groupby([hourly_df['timestamp'].dt.hour, 'sender_label']).size().unstack(fill_value=0)
+                        hourly_df = gdf[
+                            gdf["sender_label"].isin(selected_timeline_members)
+                        ].copy()
+                        hourly = (
+                            hourly_df.groupby(
+                                [hourly_df["timestamp"].dt.hour, "sender_label"]
+                            )
+                            .size()
+                            .unstack(fill_value=0)
+                        )
                         if grp_show_cumulative and not hourly.empty:
                             hourly = hourly.cumsum()
 
@@ -2084,9 +2956,13 @@ if 'data' in st.session_state:
                                 y=hourly.columns,
                                 markers=True,
                                 title=f"Hourly Activity by Member ({'Cumulative' if grp_show_cumulative else 'Per Hour'})",
-                                labels={'value': 'Messages', 'index': 'Hour', 'variable': 'Member'}
+                                labels={
+                                    "value": "Messages",
+                                    "index": "Hour",
+                                    "variable": "Member",
+                                },
                             )
-                            st.plotly_chart(fig_hourly_group, width='stretch')
+                            st.plotly_chart(fig_hourly_group, width="stretch")
                         else:
                             st.info("Not enough data to plot hourly member activity.")
 
@@ -2095,64 +2971,96 @@ if 'data' in st.session_state:
 
                         with rr1:
                             st.write("**⚡ Fastest Repliers**")
-                            if 'Avg Reply (min)' in rankings.columns and rankings['Avg Reply (min)'].notna().any():
-                                rep_rank = rankings.dropna(subset=['Avg Reply (min)']).sort_values('Avg Reply (min)').head(10)
+                            if (
+                                "Avg Reply (min)" in rankings.columns
+                                and rankings["Avg Reply (min)"].notna().any()
+                            ):
+                                rep_rank = (
+                                    rankings.dropna(subset=["Avg Reply (min)"])
+                                    .sort_values("Avg Reply (min)")
+                                    .head(10)
+                                )
                                 fig_rep_fast = px.bar(
                                     rep_rank.reset_index(),
-                                    x='Avg Reply (min)',
-                                    y='sender_label',
-                                    orientation='h',
+                                    x="Avg Reply (min)",
+                                    y="sender_label",
+                                    orientation="h",
                                     title="Lowest Avg Reply Delay",
-                                    labels={'sender_label': 'Member'}
+                                    labels={"sender_label": "Member"},
                                 )
                                 rep_order = rep_rank.index.map(str).tolist()[::-1]
-                                fig_rep_fast.update_layout(yaxis={'type': 'category', 'categoryorder': 'array', 'categoryarray': rep_order})
-                                st.plotly_chart(fig_rep_fast, width='stretch')
+                                fig_rep_fast.update_layout(
+                                    yaxis={
+                                        "type": "category",
+                                        "categoryorder": "array",
+                                        "categoryarray": rep_order,
+                                    }
+                                )
+                                st.plotly_chart(fig_rep_fast, width="stretch")
                             else:
                                 st.caption("Not enough reply events.")
 
                         with rr2:
                             st.write("**👀 Fastest Readers of My Messages**")
-                            if 'Avg Their Read (min)' in rankings.columns and rankings['Avg Their Read (min)'].notna().any():
-                                read_rank = rankings.dropna(subset=['Avg Their Read (min)']).sort_values('Avg Their Read (min)').head(10)
+                            if (
+                                "Avg Their Read (min)" in rankings.columns
+                                and rankings["Avg Their Read (min)"].notna().any()
+                            ):
+                                read_rank = (
+                                    rankings.dropna(subset=["Avg Their Read (min)"])
+                                    .sort_values("Avg Their Read (min)")
+                                    .head(10)
+                                )
                                 fig_read_fast = px.bar(
                                     read_rank.reset_index(),
-                                    x='Avg Their Read (min)',
-                                    y='sender_label',
-                                    orientation='h',
+                                    x="Avg Their Read (min)",
+                                    y="sender_label",
+                                    orientation="h",
                                     title="Lowest Avg Read Delay (Per Member)",
-                                    labels={'sender_label': 'Member'}
+                                    labels={"sender_label": "Member"},
                                 )
                                 read_order = read_rank.index.map(str).tolist()[::-1]
-                                fig_read_fast.update_layout(yaxis={'type': 'category', 'categoryorder': 'array', 'categoryarray': read_order})
-                                st.plotly_chart(fig_read_fast, width='stretch')
+                                fig_read_fast.update_layout(
+                                    yaxis={
+                                        "type": "category",
+                                        "categoryorder": "array",
+                                        "categoryarray": read_order,
+                                    }
+                                )
+                                st.plotly_chart(fig_read_fast, width="stretch")
                             else:
-                                st.caption("No per-member read receipts found for this group.")
+                                st.caption(
+                                    "No per-member read receipts found for this group."
+                                )
 
                         # ---- Response Time Distribution (Multi-Member) ----
                         st.subheader("⏱️ Response Time Distribution")
                         focus_members = rankings.index.tolist()
                         if focus_members and not reply_df.empty:
-                            default_dist_members = focus_members[:min(5, len(focus_members))]
+                            default_dist_members = focus_members[
+                                : min(5, len(focus_members))
+                            ]
                             selected_dist_members = st.multiselect(
                                 "Members for Distribution",
                                 focus_members,
                                 default=default_dist_members,
-                                key="grp_dist_members"
+                                key="grp_dist_members",
                             )
 
                             if selected_dist_members:
-                                dist_df = reply_df[reply_df['sender_label'].isin(selected_dist_members)].copy()
+                                dist_df = reply_df[
+                                    reply_df["sender_label"].isin(selected_dist_members)
+                                ].copy()
                                 if not dist_df.empty:
                                     max_seconds = grp_reply_thresh_h * 3600
                                     segments = [
-                                        (60, '<1m'),
-                                        (300, '1-5m'),
-                                        (900, '5-15m'),
-                                        (3600, '15m-1h'),
-                                        (14400, '1h-4h'),
-                                        (28800, '4h-8h'),
-                                        (max_seconds, f'>8h to {grp_reply_thresh_h}h')
+                                        (60, "<1m"),
+                                        (300, "1-5m"),
+                                        (900, "5-15m"),
+                                        (3600, "15m-1h"),
+                                        (14400, "1h-4h"),
+                                        (28800, "4h-8h"),
+                                        (max_seconds, f">8h to {grp_reply_thresh_h}h"),
                                     ]
                                     bins = [0]
                                     labels = []
@@ -2162,96 +3070,124 @@ if 'data' in st.session_state:
                                             bins.append(edge)
                                             labels.append(label)
 
-                                    dist_df['bucket'] = pd.cut(
-                                        dist_df['reply_seconds'],
+                                    dist_df["bucket"] = pd.cut(
+                                        dist_df["reply_seconds"],
                                         bins=bins,
                                         labels=labels,
                                         include_lowest=True,
-                                        duplicates='drop'
+                                        duplicates="drop",
                                     )
 
                                     dist_counts = (
-                                        dist_df.groupby(['sender_label', 'bucket'], observed=False)
+                                        dist_df.groupby(
+                                            ["sender_label", "bucket"], observed=False
+                                        )
                                         .size()
-                                        .reset_index(name='count')
+                                        .reset_index(name="count")
                                     )
-                                    dist_counts['sender_label'] = dist_counts['sender_label'].astype(str)
+                                    dist_counts["sender_label"] = dist_counts[
+                                        "sender_label"
+                                    ].astype(str)
                                     fig_dist = px.bar(
                                         dist_counts,
-                                        x='sender_label',
-                                        y='count',
-                                        color='bucket',
-                                        barmode='stack',
+                                        x="sender_label",
+                                        y="count",
+                                        color="bucket",
+                                        barmode="stack",
                                         title="Reply Delay Buckets by Member",
-                                        labels={'sender_label': 'Member', 'count': 'Replies', 'bucket': 'Delay Bucket'}
+                                        labels={
+                                            "sender_label": "Member",
+                                            "count": "Replies",
+                                            "bucket": "Delay Bucket",
+                                        },
                                     )
-                                    fig_dist.update_layout(xaxis={'type': 'category'})
-                                    st.plotly_chart(fig_dist, width='stretch')
+                                    fig_dist.update_layout(xaxis={"type": "category"})
+                                    st.plotly_chart(fig_dist, width="stretch")
 
                                     summary = (
-                                        dist_df.groupby('sender_label')['reply_seconds']
+                                        dist_df.groupby("sender_label")["reply_seconds"]
                                         .mean()
                                         .div(60)
-                                        .rename('Avg Reply (min)')
+                                        .rename("Avg Reply (min)")
                                         .to_frame()
                                     )
-                                    summary['Group Avg (min)'] = reply_df['reply_seconds'].mean() / 60
-                                    summary['Delta vs Group (min)'] = summary['Avg Reply (min)'] - summary['Group Avg (min)']
-                                    st.dataframe(summary.sort_values('Avg Reply (min)'), use_container_width=True)
+                                    summary["Group Avg (min)"] = (
+                                        reply_df["reply_seconds"].mean() / 60
+                                    )
+                                    summary["Delta vs Group (min)"] = (
+                                        summary["Avg Reply (min)"]
+                                        - summary["Group Avg (min)"]
+                                    )
+                                    st.dataframe(
+                                        summary.sort_values("Avg Reply (min)"),
+                                        use_container_width=True,
+                                    )
                                 else:
-                                    st.caption("Not enough reply events for selected members.")
+                                    st.caption(
+                                        "Not enough reply events for selected members."
+                                    )
                             else:
                                 st.caption("Select at least one member.")
                         else:
-                            st.caption("Not enough reply events for distribution analysis.")
+                            st.caption(
+                                "Not enough reply events for distribution analysis."
+                            )
 
                         # ---- Composition Comparison ----
                         st.subheader("🧩 Message Composition by Member")
                         members_for_comp = rankings.index.tolist()
-                        default_members = members_for_comp[:min(6, len(members_for_comp))]
+                        default_members = members_for_comp[
+                            : min(6, len(members_for_comp))
+                        ]
                         selected_comp_members = st.multiselect(
                             "Members for Composition Chart",
                             members_for_comp,
                             default=default_members,
-                            key="grp_comp_members"
+                            key="grp_comp_members",
                         )
 
                         def categorize_group_msg(row):
-                            mime = str(row.get('mime_type', ''))
-                            if pd.isna(mime) or mime in ['', 'None']:
-                                return 'Text'
-                            if 'image/webp' in mime:
-                                return 'Sticker'
-                            if 'image' in mime:
-                                return 'Image'
-                            if 'video' in mime:
-                                return 'Video'
-                            if 'audio' in mime:
-                                return 'Audio'
-                            return 'Other'
+                            mime = str(row.get("mime_type", ""))
+                            if pd.isna(mime) or mime in ["", "None"]:
+                                return "Text"
+                            if "image/webp" in mime:
+                                return "Sticker"
+                            if "image" in mime:
+                                return "Image"
+                            if "video" in mime:
+                                return "Video"
+                            if "audio" in mime:
+                                return "Audio"
+                            return "Other"
 
-                        gdf['type_category'] = gdf.apply(categorize_group_msg, axis=1)
+                        gdf["type_category"] = gdf.apply(categorize_group_msg, axis=1)
 
                         if selected_comp_members:
                             comp_df = (
-                                gdf[gdf['sender_label'].isin(selected_comp_members)]
-                                .groupby(['sender_label', 'type_category'])
+                                gdf[gdf["sender_label"].isin(selected_comp_members)]
+                                .groupby(["sender_label", "type_category"])
                                 .size()
-                                .reset_index(name='count')
+                                .reset_index(name="count")
                             )
                             if not comp_df.empty:
                                 fig_comp = px.bar(
                                     comp_df,
-                                    x='sender_label',
-                                    y='count',
-                                    color='type_category',
-                                    barmode='stack',
+                                    x="sender_label",
+                                    y="count",
+                                    color="type_category",
+                                    barmode="stack",
                                     title="Message Type Mix by Member",
-                                    labels={'sender_label': 'Member', 'count': 'Messages', 'type_category': 'Type'}
+                                    labels={
+                                        "sender_label": "Member",
+                                        "count": "Messages",
+                                        "type_category": "Type",
+                                    },
                                 )
-                                st.plotly_chart(fig_comp, width='stretch')
+                                st.plotly_chart(fig_comp, width="stretch")
                             else:
-                                st.caption("No composition data for the selected members.")
+                                st.caption(
+                                    "No composition data for the selected members."
+                                )
                         else:
                             st.caption("Select at least one member.")
 
@@ -2260,14 +3196,26 @@ if 'data' in st.session_state:
                         all_member_choices = rankings.index.tolist()
                         if len(all_member_choices) >= 1:
                             wc1, wc2 = st.columns(2)
-                            member_a = wc1.selectbox("Member A", all_member_choices, key="grp_wc_member_a")
-                            member_b = wc2.selectbox("Member B", all_member_choices, index=min(1, len(all_member_choices)-1), key="grp_wc_member_b")
+                            member_a = wc1.selectbox(
+                                "Member A", all_member_choices, key="grp_wc_member_a"
+                            )
+                            member_b = wc2.selectbox(
+                                "Member B",
+                                all_member_choices,
+                                index=min(1, len(all_member_choices) - 1),
+                                key="grp_wc_member_b",
+                            )
 
-                            if st.button("Generate Group Word Clouds", key="grp_generate_wc"):
+                            if st.button(
+                                "Generate Group Word Clouds", key="grp_generate_wc"
+                            ):
                                 wc_col1, wc_col2 = st.columns(2)
-                                for col, member in [(wc_col1, member_a), (wc_col2, member_b)]:
+                                for col, member in [
+                                    (wc_col1, member_a),
+                                    (wc_col2, member_b),
+                                ]:
                                     member_text = " ".join(
-                                        gdf[gdf['sender_label'] == member]['text_data']
+                                        gdf[gdf["sender_label"] == member]["text_data"]
                                         .dropna()
                                         .astype(str)
                                         .tolist()
@@ -2275,401 +3223,574 @@ if 'data' in st.session_state:
                                     with col:
                                         st.caption(member)
                                         if member_text.strip():
-                                            wc = WordCloud(width=450, height=300, background_color='white').generate(member_text)
+                                            wc = WordCloud(
+                                                width=450,
+                                                height=300,
+                                                background_color="white",
+                                            ).generate(member_text)
                                             plt.figure(figsize=(5, 4))
-                                            plt.imshow(wc, interpolation='bilinear')
-                                            plt.axis('off')
+                                            plt.imshow(wc, interpolation="bilinear")
+                                            plt.axis("off")
                                             st.pyplot(plt)
                                         else:
                                             st.caption("No text data.")
 
                         # ---- Recent Messages ----
                         st.subheader("💬 Recent Group Messages")
-                        msg_cols = ['timestamp', 'sender_label', 'text_data']
-                        if 'mime_type' in gdf.columns:
-                            msg_cols.append('mime_type')
+                        msg_cols = ["timestamp", "sender_label", "text_data"]
+                        if "mime_type" in gdf.columns:
+                            msg_cols.append("mime_type")
                         st.dataframe(
-                            gdf[msg_cols].sort_values('timestamp', ascending=False).head(30),
-                            use_container_width=True
+                            gdf[msg_cols]
+                            .sort_values("timestamp", ascending=False)
+                            .head(30),
+                            use_container_width=True,
                         )
 
     with tab7:
         st.header("🎪 Fun & Insights")
-        
+
         col_fun_ctrl1, col_fun_ctrl2 = st.columns(2)
-        top_n_filter = col_fun_ctrl1.selectbox("Filter Rank to Top Contacts:", [50, 100, 200, "All"], index=1, help="Analyze only the most active contacts to reduce noise.")
+        top_n_filter = col_fun_ctrl1.selectbox(
+            "Filter Rank to Top Contacts:",
+            [50, 100, 200, "All"],
+            index=1,
+            help="Analyze only the most active contacts to reduce noise.",
+        )
         top_n_val = None if top_n_filter == "All" else int(top_n_filter)
-        
-        
+
         # Calculate Stats
         # Pass exclude_groups from sidebar
         # Calculate Stats using FULL Data (Context needed for Double Text, Streaks, Killers)
         # But we must respect exclude_me for the DISPLAY.
         full_analyzer_tab6 = WhatsappAnalyzer(df_base, use_medians=use_medians)
-        
+
         # Pass exclude_groups from sidebar
-        ex_groups = exclude_groups if 'exclude_groups' in locals() else False
-        
+        ex_groups = exclude_groups if "exclude_groups" in locals() else False
+
         # Force exclude_groups=True for Behavioral/Fun stats as requested (Double Text, Dry Texter)
         # These metrics usually only make sense for 1-on-1 chats.
         beh_scorecard = full_analyzer_tab6.get_behavioral_scorecard(exclude_groups=True)
-        fun_stats = full_analyzer_tab6.get_fun_stats(top_n=top_n_val, exclude_groups=True)
+        fun_stats = full_analyzer_tab6.get_fun_stats(
+            top_n=top_n_val, exclude_groups=True
+        )
         streaks = full_analyzer_tab6.get_streak_stats(exclude_groups=ex_groups)
         killers = full_analyzer_tab6.get_conversation_killers(exclude_groups=ex_groups)
-        
+
         # New Stats
         # Pass exclude_me (global) to filter "Me" from top reactors
-        reaction_stats = full_analyzer_tab6.get_reaction_stats(exclude_groups=ex_groups, exclude_me=exclude_me)
-        emoji_stats = full_analyzer_tab6.get_emoji_stats(top_n=top_n_val, exclude_groups=ex_groups)
-        mention_stats = full_analyzer_tab6.get_mention_stats(top_n=top_n_val, exclude_groups=ex_groups)
-        history_stats = full_analyzer_tab6.get_historical_stats(exclude_groups=ex_groups)
-        
+        reaction_stats = full_analyzer_tab6.get_reaction_stats(
+            exclude_groups=ex_groups, exclude_me=exclude_me
+        )
+        emoji_stats = full_analyzer_tab6.get_emoji_stats(
+            top_n=top_n_val, exclude_groups=ex_groups
+        )
+        mention_stats = full_analyzer_tab6.get_mention_stats(
+            top_n=top_n_val, exclude_groups=ex_groups
+        )
+        history_stats = full_analyzer_tab6.get_historical_stats(
+            exclude_groups=ex_groups
+        )
+
         # Post-Calculation Filter: Remove "You" / "Me" if exclude_me is True
         if exclude_me:
-             # Identify 'Me' name (usually 'You', 'Me', 'Myself' or me_display)
-             # Parser ensures outgoing is mapped to "You". 
-             me_names = ['You', 'Me', 'Myself']
-             if 'me_display' in locals(): me_names.append(str(me_display)) # if resolved
-             
-             # Filter Index (usually contact_name)
-             if not beh_scorecard.empty: beh_scorecard = beh_scorecard[~beh_scorecard.index.isin(me_names)]
-             if not fun_stats.empty: fun_stats = fun_stats[~fun_stats.index.isin(me_names)]
-             if not streaks.empty: streaks = streaks[~streaks.index.isin(me_names)]
-             if not killers.empty: killers = killers[~killers.index.isin(me_names)]
-             
-             # Reaction stats is a dict
-             if reaction_stats and 'top_reactors' in reaction_stats:
-                  reaction_stats['top_reactors'] = reaction_stats['top_reactors'][~reaction_stats['top_reactors'].index.isin(me_names)]
-                  
-                  # Fix: Apply "Exclude Non-Contacts" filter to Reactors too
-                  # Because the reactor might be a non-contact even if the message thread is valid.
-                  if exclude_non_contacts:
-                      # Filter out names that are just numbers/invalid
-                      is_valid_contact = pd.Series(reaction_stats['top_reactors'].index, index=reaction_stats['top_reactors'].index).apply(lambda x: bool(re.search('[a-zA-Z]', str(x))))
-                      reaction_stats['top_reactors'] = reaction_stats['top_reactors'][is_valid_contact]
-             
-             # Emoji stats is dict
-             # per_contact...
-             if emoji_stats and 'per_contact' in emoji_stats:
-                  # per_contact has 'contact_name' column
-                  emoji_stats['per_contact'] = emoji_stats['per_contact'][~emoji_stats['per_contact']['contact_name'].isin(me_names)]
-             
-             # Mention stats is dict
-             # who_mentions_me (index is sender)
-             if mention_stats and 'who_mentions_me' in mention_stats:
-                  mention_stats['who_mentions_me'] = mention_stats['who_mentions_me'][~mention_stats['who_mentions_me'].index.isin(me_names)]
-             # i_mention (index is target) - keep? Yes, it's who I mention.
+            # Identify 'Me' name (usually 'You', 'Me', 'Myself' or me_display)
+            # Parser ensures outgoing is mapped to "You".
+            me_names = ["You", "Me", "Myself"]
+            if "me_display" in locals():
+                me_names.append(str(me_display))  # if resolved
 
-        
+            # Filter Index (usually contact_name)
+            if not beh_scorecard.empty:
+                beh_scorecard = beh_scorecard[~beh_scorecard.index.isin(me_names)]
+            if not fun_stats.empty:
+                fun_stats = fun_stats[~fun_stats.index.isin(me_names)]
+            if not streaks.empty:
+                streaks = streaks[~streaks.index.isin(me_names)]
+            if not killers.empty:
+                killers = killers[~killers.index.isin(me_names)]
+
+            # Reaction stats is a dict
+            if reaction_stats and "top_reactors" in reaction_stats:
+                reaction_stats["top_reactors"] = reaction_stats["top_reactors"][
+                    ~reaction_stats["top_reactors"].index.isin(me_names)
+                ]
+
+                # Fix: Apply "Exclude Non-Contacts" filter to Reactors too
+                # Because the reactor might be a non-contact even if the message thread is valid.
+                if exclude_non_contacts:
+                    # Filter out names that are just numbers/invalid
+                    is_valid_contact = pd.Series(
+                        reaction_stats["top_reactors"].index,
+                        index=reaction_stats["top_reactors"].index,
+                    ).apply(lambda x: bool(re.search("[a-zA-Z]", str(x))))
+                    reaction_stats["top_reactors"] = reaction_stats["top_reactors"][
+                        is_valid_contact
+                    ]
+
+            # Emoji stats is dict
+            # per_contact...
+            if emoji_stats and "per_contact" in emoji_stats:
+                # per_contact has 'contact_name' column
+                emoji_stats["per_contact"] = emoji_stats["per_contact"][
+                    ~emoji_stats["per_contact"]["contact_name"].isin(me_names)
+                ]
+
+            # Mention stats is dict
+            # who_mentions_me (index is sender)
+            if mention_stats and "who_mentions_me" in mention_stats:
+                mention_stats["who_mentions_me"] = mention_stats["who_mentions_me"][
+                    ~mention_stats["who_mentions_me"].index.isin(me_names)
+                ]
+            # i_mention (index is target) - keep? Yes, it's who I mention.
+
         # Pre-calc combined media for Gallery Curator
-        if 'image_media' in fun_stats.columns and 'video_media' in fun_stats.columns:
-            fun_stats['gallery_count'] = fun_stats['image_media'] + fun_stats['video_media']
+        if "image_media" in fun_stats.columns and "video_media" in fun_stats.columns:
+            fun_stats["gallery_count"] = (
+                fun_stats["image_media"] + fun_stats["video_media"]
+            )
         else:
-            fun_stats['gallery_count'] = fun_stats['media'] # Fallback
-            
+            fun_stats["gallery_count"] = fun_stats["media"]  # Fallback
+
         # 1. Hall of Fame
         st.subheader("🏆 Hall of Fame")
-        
+
         # New Feature: Percentage Mode
-        use_pct = st.checkbox("Calculate based of % of total message (Density)", value=False, help="Normalizes metrics by the number of messages sent by each person.")
-        
+        use_pct = st.checkbox(
+            "Calculate based of % of total message (Density)",
+            value=False,
+            help="Normalizes metrics by the number of messages sent by each person.",
+        )
+
         # Pre-calculate Message Counts for Normalization
         # Use full_analyzer data (df_base)
         # We need a series of contact_name -> message_count
         if use_pct:
             # We already have df_base.
-            msg_counts = df_base['contact_name'].value_counts()
-        
+            msg_counts = df_base["contact_name"].value_counts()
+
         hof_1, hof_2, hof_3 = st.columns(3)
-        
+
         # Helper to get top user with optional normalization
         def get_top(df, col, exclude_list=[]):
-            if df.empty or col not in df.columns: return "N/A", 0
-            
+            if df.empty or col not in df.columns:
+                return "N/A", 0
+
             # If % mode, we need to normalize 'col' by message count
             # This requires 'df' to have an index of contact_name matching msg_counts
             target_series = df[col]
-            
-            if use_pct and 'pct' not in col: # Don't normalize columns that are already % (like night_owl_pct)
-                 # Align data
-                 # We need to ensure we match indices
-                 aligned_counts = msg_counts.reindex(target_series.index).fillna(1) # avoid div/0
-                 target_series = (target_series / aligned_counts) * 100
-            
+
+            if (
+                use_pct and "pct" not in col
+            ):  # Don't normalize columns that are already % (like night_owl_pct)
+                # Align data
+                # We need to ensure we match indices
+                aligned_counts = msg_counts.reindex(target_series.index).fillna(
+                    1
+                )  # avoid div/0
+                target_series = (target_series / aligned_counts) * 100
+
             sorted_series = target_series.sort_values(ascending=False)
-            if sorted_series.empty: return "N/A", 0
-            
+            if sorted_series.empty:
+                return "N/A", 0
+
             top_name = sorted_series.index[0]
             top_val = sorted_series.iloc[0]
             return top_name, top_val
 
         with hof_1:
-            name, val = get_top(beh_scorecard, 'night_owl_pct')
-            st.metric("🦉 The Night Owl", name, f"{val:.1f}% Night Msgs")
-            
+            name, val = get_top(beh_scorecard, "night_owl_pct")
+            st.metric(
+                "🦉 The Night Owl", name, f"{av(val, _anon_numbers):.1f}% Night Msgs"
+            )
+
         with hof_2:
-            name, val = get_top(beh_scorecard, 'early_bird_pct')
-            st.metric("☀️ The Early Bird", name, f"{val:.1f}% Morning Msgs")
-            
+            name, val = get_top(beh_scorecard, "early_bird_pct")
+            st.metric(
+                "☀️ The Early Bird", name, f"{av(val, _anon_numbers):.1f}% Morning Msgs"
+            )
+
         with hof_3:
-            name, val = get_top(fun_stats, 'laughs')
-            if use_pct: st.metric("😂 The Comedian", name, f"{val:.1f}% of msgs")
-            else: st.metric("😂 The Comedian", name, f"{int(val)} Laughs")
-            
+            name, val = get_top(fun_stats, "laughs")
+            if use_pct:
+                st.metric(
+                    "😂 The Comedian", name, f"{av(val, _anon_numbers):.1f}% of msgs"
+                )
+            else:
+                st.metric(
+                    "😂 The Comedian", name, f"{av(int(val), _anon_numbers)} Laughs"
+                )
+
         st.divider()
-        
+
         hof_4, hof_5, hof_6 = st.columns(3)
         with hof_4:
-            name, val = get_top(fun_stats, 'deleted')
-            if use_pct: st.metric("🗑️ The Deleter", name, f"{val:.1f}% of msgs")
-            else: st.metric("🗑️ The Deleter", name, f"{int(val)} Retracted")
-            
+            name, val = get_top(fun_stats, "deleted")
+            if use_pct:
+                st.metric(
+                    "🗑️ The Deleter", name, f"{av(val, _anon_numbers):.1f}% of msgs"
+                )
+            else:
+                st.metric(
+                    "🗑️ The Deleter", name, f"{av(int(val), _anon_numbers)} Retracted"
+                )
+
         with hof_5:
             if not streaks.empty:
                 # new get_streak_stats returns DataFrame with 'streak', 'start_date', 'end_date'
                 # Check format just in case
                 if isinstance(streaks, pd.DataFrame):
                     top_row = streaks.iloc[0]
-                    name = top_row.name # index is contact_name
-                    val = top_row['streak']
-                    s_date = top_row.get('start_date', '?')
-                    e_date = top_row.get('end_date', '?')
+                    name = top_row.name  # index is contact_name
+                    val = top_row["streak"]
+                    s_date = top_row.get("start_date", "?")
+                    e_date = top_row.get("end_date", "?")
                     tooltip_txt = f"Longest Streak: {s_date} to {e_date}"
-                else: 
+                else:
                     # Legacy fallback if something weird happens
                     name = streaks.idxmax()
                     val = streaks.max()
                     tooltip_txt = "Date range unavailable"
-            else: 
+            else:
                 name, val = "N/A", 0
                 tooltip_txt = ""
-                
-            st.metric("🔥 Streak Master", name, f"{val} Days", help=tooltip_txt)
-            
-        with hof_6: # (Was hof_5 in original code, fixing index)
+
+            st.metric(
+                "🔥 Streak Master",
+                name,
+                f"{av(val, _anon_numbers)} Days",
+                help=tooltip_txt,
+            )
+
+        with hof_6:  # (Was hof_5 in original code, fixing index)
             # Killers is a Series
             if not killers.empty:
                 target = killers
                 if use_pct:
-                     aligned_counts = msg_counts.reindex(target.index).fillna(1)
-                     target = (target / aligned_counts) * 100
-                     target = target.sort_values(ascending=False)
-                
+                    aligned_counts = msg_counts.reindex(target.index).fillna(1)
+                    target = (target / aligned_counts) * 100
+                    target = target.sort_values(ascending=False)
+
                 name = target.index[0]
                 val = target.iloc[0]
-                
-                if use_pct: st.metric("🤐 Conversation Killer", name, f"{val:.1f}% Kill Rate")
-                else: st.metric("🤐 Conversation Killer", name, f"{val} Silences")
-            else: 
+
+                if use_pct:
+                    st.metric(
+                        "🤐 Conversation Killer",
+                        name,
+                        f"{av(val, _anon_numbers):.1f}% Kill Rate",
+                    )
+                else:
+                    st.metric(
+                        "🤐 Conversation Killer",
+                        name,
+                        f"{av(val, _anon_numbers)} Silences",
+                    )
+            else:
                 # name, val = "N/A", 0 # Variable leak if block skipped? No.
                 st.metric("🤐 Conversation Killer", "N/A", "0")
-            
+
         st.divider()
-        
+
         hof_7, hof_8, hof_9 = st.columns(3)
         with hof_7:
-            name, val = get_top(fun_stats, 'audio_media')
-            if use_pct: st.metric("🎙️ The Podcaster", name, f"{val:.1f}% of msgs")
-            else: st.metric("🎙️ The Podcaster", name, f"{int(val)} Voice Notes")
-            
-        with hof_8:
-            name, val = get_top(fun_stats, 'gallery_count')
-            if use_pct: st.metric("🖼️ Gallery Curator", name, f"{val:.1f}% of msgs")
-            else: st.metric("🖼️ Gallery Curator", name, f"{int(val)} Pics/Vids")
-            
-        with hof_9:
-             if reaction_stats and not reaction_stats['top_reactors'].empty:
-                 target = reaction_stats['top_reactors'] # This is a Series
-                 if use_pct:
-                      aligned_counts = msg_counts.reindex(target.index).fillna(1)
-                      target = (target / aligned_counts) * 100
-                      target = target.sort_values(ascending=False)
+            name, val = get_top(fun_stats, "audio_media")
+            if use_pct:
+                st.metric(
+                    "🎙️ The Podcaster", name, f"{av(val, _anon_numbers):.1f}% of msgs"
+                )
+            else:
+                st.metric(
+                    "🎙️ The Podcaster",
+                    name,
+                    f"{av(int(val), _anon_numbers)} Voice Notes",
+                )
 
-                 name = target.index[0]
-                 val = target.iloc[0]
-                 
-                 if use_pct: st.metric("😍 Reaction addict", name, f"{val:.1f}% Rate")
-                 else: st.metric("😍 Reaction addict", name, f"{val} Reactions")
-             else:
-                 st.metric("😍 Reaction addict", "N/A", "0")
-             
+        with hof_8:
+            name, val = get_top(fun_stats, "gallery_count")
+            if use_pct:
+                st.metric(
+                    "🖼️ Gallery Curator", name, f"{av(val, _anon_numbers):.1f}% of msgs"
+                )
+            else:
+                st.metric(
+                    "🖼️ Gallery Curator",
+                    name,
+                    f"{av(int(val), _anon_numbers)} Pics/Vids",
+                )
+
+        with hof_9:
+            if reaction_stats and not reaction_stats["top_reactors"].empty:
+                target = reaction_stats["top_reactors"]  # This is a Series
+                if use_pct:
+                    aligned_counts = msg_counts.reindex(target.index).fillna(1)
+                    target = (target / aligned_counts) * 100
+                    target = target.sort_values(ascending=False)
+
+                name = target.index[0]
+                val = target.iloc[0]
+
+                if use_pct:
+                    st.metric(
+                        "😍 Reaction addict",
+                        name,
+                        f"{av(val, _anon_numbers):.1f}% Rate",
+                    )
+                else:
+                    st.metric(
+                        "😍 Reaction addict",
+                        name,
+                        f"{av(val, _anon_numbers)} Reactions",
+                    )
+            else:
+                st.metric("😍 Reaction addict", "N/A", "0")
+
         st.divider()
-        
+
         # --- NEW SECTIONS ---
-        
+
         # 1. Emoji Analysis
-        if emoji_stats and not emoji_stats['per_contact'].empty:
-             st.subheader("❤️ The Emoji Fanatic")
-             # Show Top 5 Emojis for Top 5 Users
-             # emoji_stats['per_contact'] is a DF with contact, emoji, count
-             # Pivot to allow nice display? Or just list?
-             # Let's show a dataframe of "User | Top 5 Emojis"
-             
-             # Group by contact, join emojis
-             # Group by contact, join emojis
-             # --- UI IMPROVEMENT: Default Top 10 (Most Active) + Search ---
-             # Get top talkers for default selection
-             top_active = full_analyzer_tab6.get_top_talkers(n=10, metric='messages')
-             default_selection = top_active['contact_name'].tolist() if not top_active.empty else []
-             
-             all_contacts_emoji = emoji_stats['per_contact']['contact_name'].unique().tolist()
-             
-             # Intersect top active with emoji contacts to ensure validity
-             default_emoji_sel = [c for c in default_selection if c in all_contacts_emoji]
-             if not default_emoji_sel: default_emoji_sel = all_contacts_emoji[:10]
-             
-             sel_emoji_contacts = st.multiselect("Select Contacts", all_contacts_emoji, default=default_emoji_sel)
-             
-             if sel_emoji_contacts:
-                 filtered_emoji = emoji_stats['per_contact'][emoji_stats['per_contact']['contact_name'].isin(sel_emoji_contacts)]
-                 top_emo_disp = filtered_emoji.groupby('contact_name')['emoji'].apply(lambda x: " ".join(x)).reset_index(name='Top Emojis')
-                 st.dataframe(top_emo_disp.set_index('contact_name'), use_container_width=True)
-             else:
-                 st.write("No contacts selected.")
-             
+        if emoji_stats and not emoji_stats["per_contact"].empty:
+            st.subheader("❤️ The Emoji Fanatic")
+            # Show Top 5 Emojis for Top 5 Users
+            # emoji_stats['per_contact'] is a DF with contact, emoji, count
+            # Pivot to allow nice display? Or just list?
+            # Let's show a dataframe of "User | Top 5 Emojis"
+
+            # Group by contact, join emojis
+            # Group by contact, join emojis
+            # --- UI IMPROVEMENT: Default Top 10 (Most Active) + Search ---
+            # Get top talkers for default selection
+            top_active = full_analyzer_tab6.get_top_talkers(n=10, metric="messages")
+            default_selection = (
+                top_active["contact_name"].tolist() if not top_active.empty else []
+            )
+
+            all_contacts_emoji = (
+                emoji_stats["per_contact"]["contact_name"].unique().tolist()
+            )
+
+            # Intersect top active with emoji contacts to ensure validity
+            default_emoji_sel = [
+                c for c in default_selection if c in all_contacts_emoji
+            ]
+            if not default_emoji_sel:
+                default_emoji_sel = all_contacts_emoji[:10]
+
+            sel_emoji_contacts = st.multiselect(
+                "Select Contacts", all_contacts_emoji, default=default_emoji_sel
+            )
+
+            if sel_emoji_contacts:
+                filtered_emoji = emoji_stats["per_contact"][
+                    emoji_stats["per_contact"]["contact_name"].isin(sel_emoji_contacts)
+                ]
+                top_emo_disp = (
+                    filtered_emoji.groupby("contact_name")["emoji"]
+                    .apply(lambda x: " ".join(x))
+                    .reset_index(name="Top Emojis")
+                )
+                st.dataframe(
+                    top_emo_disp.set_index("contact_name"), use_container_width=True
+                )
+            else:
+                st.write("No contacts selected.")
+
         # 2. Reaction Deep Dive
         if reaction_stats:
             st.subheader("😍 Reaction Insights")
             col_r1, col_r2 = st.columns(2)
             with col_r1:
                 st.write("**Most Reacted Messages**")
-                st.dataframe(reaction_stats['most_reacted'][['chat_contact', 'preview', 'count']].head(5))
+                st.dataframe(
+                    reaction_stats["most_reacted"][
+                        ["chat_contact", "preview", "count"]
+                    ].head(5)
+                )
             with col_r2:
                 st.write("**Top Global Emojis**")
                 # Top emojis as bar chart
-                top_em = reaction_stats['top_emojis']
+                top_em = reaction_stats["top_emojis"]
                 st.bar_chart(top_em)
-                
+
         # 3. Mentions
         if mention_stats:
             st.subheader("📢 Mentions (@Tags)")
             col_m1, col_m2 = st.columns(2)
             with col_m1:
                 st.write("**Who Mentions Me Most?**")
-                st.bar_chart(mention_stats['who_mentions_me'])
+                st.bar_chart(mention_stats["who_mentions_me"])
             with col_m2:
                 st.write("**Who Do I Mention Most?**")
-                st.bar_chart(mention_stats['i_mention'])
-                
+                st.bar_chart(mention_stats["i_mention"])
+
         # 4. Historical Deep Dive
         if history_stats:
             st.subheader("📜 Historical Deep Dive")
-            
+
             # Velocity
             st.write("**⚡ Message Velocity (Max Words Per Minute)**")
             st.caption("Highest WPM achieved in a single minute of conversation.")
-            
+
             # --- UI IMPROVEMENT: Default Top 10 + Search ---
-            velocity_df = history_stats['velocity_wpm'] # Series
+            velocity_df = history_stats["velocity_wpm"]  # Series
             all_vel_contacts = velocity_df.index.tolist()
-            
+
             # Reuse default_selection (Top 10 Active) from above if available, else recalc or slice
-            if 'default_selection' in locals():
+            if "default_selection" in locals():
                 default_vel = [c for c in default_selection if c in all_vel_contacts]
-                if not default_vel: default_vel = all_vel_contacts[:10]
+                if not default_vel:
+                    default_vel = all_vel_contacts[:10]
             else:
-                 default_vel = all_vel_contacts[:10]
-            
-            sel_vel_contacts = st.multiselect("Select Contacts for Velocity", all_vel_contacts, default=default_vel)
-            
+                default_vel = all_vel_contacts[:10]
+
+            sel_vel_contacts = st.multiselect(
+                "Select Contacts for Velocity", all_vel_contacts, default=default_vel
+            )
+
             if sel_vel_contacts:
                 filtered_vel = velocity_df[velocity_df.index.isin(sel_vel_contacts)]
                 st.bar_chart(filtered_vel, horizontal=True)
             else:
                 st.write("No contacts selected.")
-            
+
             # First Message
             # First Message
             st.write("**🕰️ How it Started (First Messages)**")
-            first_msgs = history_stats['first_msgs'].reset_index()
+            first_msgs = history_stats["first_msgs"].reset_index()
             # Select contact
-            sel_contact_hist = st.selectbox("Select Contact to see First Message:", first_msgs['chat_name'].unique())
+            sel_contact_hist = st.selectbox(
+                "Select Contact to see First Message:", first_msgs["chat_name"].unique()
+            )
             if sel_contact_hist:
-                row = first_msgs[first_msgs['chat_name'] == sel_contact_hist].iloc[0]
+                row = first_msgs[first_msgs["chat_name"] == sel_contact_hist].iloc[0]
                 st.markdown(f"**Date:** {row['timestamp']}")
-                st.markdown(f"**Message:** *\"{row['text_data']}\"*")
+                st.markdown(f'**Message:** *"{row["text_data"]}"*')
 
         st.divider()
         col_lod1, col_lod2 = st.columns(2)
-        
+
         # Filter Checkbox
-        ghost_filter = st.checkbox("Hide contacts with 0 'True Ghost' value (Only show confirmed ghosts)", value=False)
-        
+        ghost_filter = st.checkbox(
+            "Hide contacts with 0 'True Ghost' value (Only show confirmed ghosts)",
+            value=False,
+        )
+
         with col_lod1:
-             st.write("**People I Ignore** (Me → Them)")
-             my_ignore_stats = full_analyzer_tab6.get_left_on_read_stats()
-             
-             if not my_ignore_stats.empty:
-                 cols_to_plot = [c for c in my_ignore_stats.columns if c in ['True Ghost 👻', 'Left on Delivered 📨']]
-                 data_to_plot = my_ignore_stats[cols_to_plot]
-                 
-                 if ghost_filter and 'True Ghost 👻' in data_to_plot.columns:
-                     data_to_plot = data_to_plot[data_to_plot['True Ghost 👻'] > 0]
-                 
-                 if not data_to_plot.empty:
-                     st.bar_chart(data_to_plot.head(15), horizontal=True) 
-                 else:
-                     st.info("No ghosts found with current filter.")
-             else:
-                 st.info("You're a saint! 😇")
+            st.write("**People I Ignore** (Me → Them)")
+            my_ignore_stats = full_analyzer_tab6.get_left_on_read_stats()
+
+            if not my_ignore_stats.empty:
+                cols_to_plot = [
+                    c
+                    for c in my_ignore_stats.columns
+                    if c in ["True Ghost 👻", "Left on Delivered 📨"]
+                ]
+                data_to_plot = my_ignore_stats[cols_to_plot]
+
+                if ghost_filter and "True Ghost 👻" in data_to_plot.columns:
+                    data_to_plot = data_to_plot[data_to_plot["True Ghost 👻"] > 0]
+
+                if not data_to_plot.empty:
+                    st.bar_chart(data_to_plot.head(15), horizontal=True)
+                else:
+                    st.info("No ghosts found with current filter.")
+            else:
+                st.info("You're a saint! 😇")
 
         with col_lod2:
-             st.write("**People Who Ignore Me** (Them → Me)")
-             them_ignore_stats = full_analyzer_tab6.get_true_ghosting_stats(threshold_hours=24) # ghosting = them ignoring me
-             
-             if not them_ignore_stats.empty:
-                 cols_to_plot = [c for c in them_ignore_stats.columns if c in ['True Ghost 👻', 'Left on Delivered 📨']]
-                 data_to_plot = them_ignore_stats[cols_to_plot]
-                 
-                 if ghost_filter and 'True Ghost 👻' in data_to_plot.columns:
-                     data_to_plot = data_to_plot[data_to_plot['True Ghost 👻'] > 0]
-                     
-                 if not data_to_plot.empty:
-                     st.bar_chart(data_to_plot.head(15), horizontal=True)
-                 else:
-                     st.info("No ghosts found with current filter.")
-             else:
-                 st.info("Everyone loves you! 💖")
-        
+            st.write("**People Who Ignore Me** (Them → Me)")
+            them_ignore_stats = full_analyzer_tab6.get_true_ghosting_stats(
+                threshold_hours=24
+            )  # ghosting = them ignoring me
 
-            
+            if not them_ignore_stats.empty:
+                cols_to_plot = [
+                    c
+                    for c in them_ignore_stats.columns
+                    if c in ["True Ghost 👻", "Left on Delivered 📨"]
+                ]
+                data_to_plot = them_ignore_stats[cols_to_plot]
+
+                if ghost_filter and "True Ghost 👻" in data_to_plot.columns:
+                    data_to_plot = data_to_plot[data_to_plot["True Ghost 👻"] > 0]
+
+                if not data_to_plot.empty:
+                    st.bar_chart(data_to_plot.head(15), horizontal=True)
+                else:
+                    st.info("No ghosts found with current filter.")
+            else:
+                st.info("Everyone loves you! 💖")
+
         st.divider()
-        
+
         # 2. Charts
         c_fun1, c_fun2 = st.columns(2)
-        
+
         with c_fun1:
             st.subheader("🎭 Double Text Ratio")
-            st.caption("Percentage of your turns that are double-texts (continuing without reply after >20m).")
+            st.caption(
+                "Percentage of your turns that are double-texts (continuing without reply after >20m)."
+            )
             if not beh_scorecard.empty:
-                dt_df = beh_scorecard.sort_values('double_text_ratio', ascending=False).head(15)
-                fig_dt = px.bar(dt_df, x='double_text_ratio', y=dt_df.index, orientation='h',
-                                title="Highest Double Text Ratio",
-                                color='gender', color_discrete_map={'male': '#636EFA', 'female': '#EF553B', 'unknown': 'gray'})
-                fig_dt.update_layout(yaxis={'categoryorder':'total ascending'}, xaxis_title="Double Text %")
-                st.plotly_chart(fig_dt, width='stretch')
-                
+                dt_df = beh_scorecard.sort_values(
+                    "double_text_ratio", ascending=False
+                ).head(15)
+                fig_dt = px.bar(
+                    dt_df,
+                    x="double_text_ratio",
+                    y=dt_df.index,
+                    orientation="h",
+                    title="Highest Double Text Ratio",
+                    color="gender",
+                    color_discrete_map={
+                        "male": "#636EFA",
+                        "female": "#EF553B",
+                        "unknown": "gray",
+                    },
+                )
+                fig_dt.update_layout(
+                    yaxis={"categoryorder": "total ascending"},
+                    xaxis_title="Double Text %",
+                )
+                st.plotly_chart(fig_dt, width="stretch")
+
         with c_fun2:
             st.subheader("🌵 Dry Texter Index")
             st.caption("Average words per message.")
             if not fun_stats.empty:
                 # Filter out 0 value (Media only or empty text)
-                mask_dry = fun_stats['avg_word_len'] > 0
-                dry_df = fun_stats[mask_dry].sort_values('avg_word_len', ascending=True).head(15)
-                fig_dry = px.bar(dry_df, x='avg_word_len', y=dry_df.index, orientation='h',
-                                 title="Shortest Responses (Dryest)",
-                                 color='gender', color_discrete_map={'male': '#636EFA', 'female': '#EF553B', 'unknown': 'gray'})
-                fig_dry.update_layout(yaxis={'categoryorder':'total descending'}, xaxis_title="Avg Words/Msg")
-                st.plotly_chart(fig_dry, width='stretch')
-        
-
+                mask_dry = fun_stats["avg_word_len"] > 0
+                dry_df = (
+                    fun_stats[mask_dry]
+                    .sort_values("avg_word_len", ascending=True)
+                    .head(15)
+                )
+                fig_dry = px.bar(
+                    dry_df,
+                    x="avg_word_len",
+                    y=dry_df.index,
+                    orientation="h",
+                    title="Shortest Responses (Dryest)",
+                    color="gender",
+                    color_discrete_map={
+                        "male": "#636EFA",
+                        "female": "#EF553B",
+                        "unknown": "gray",
+                    },
+                )
+                fig_dry.update_layout(
+                    yaxis={"categoryorder": "total descending"},
+                    xaxis_title="Avg Words/Msg",
+                )
+                st.plotly_chart(fig_dry, width="stretch")
 
     with tab8:
         st.header("🗺️ Location Map")
         loc_data = analyzer.get_location_data()
         if not loc_data.empty:
-            st.map(loc_data, latitude='latitude', longitude='longitude')
-            st.dataframe(loc_data[['contact_name', 'timestamp', 'place_name']])
+            st.map(loc_data, latitude="latitude", longitude="longitude")
+            st.dataframe(loc_data[["contact_name", "timestamp", "place_name"]])
         else:
             st.info("No location data found in this backup.")
 
