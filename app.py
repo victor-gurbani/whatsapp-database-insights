@@ -4,6 +4,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 import os
+import sqlite3
 from wa_analyzer.src.parser import WhatsappParser
 from wa_analyzer.src.analyzer import WhatsappAnalyzer
 from wordcloud import WordCloud
@@ -83,6 +84,129 @@ def get_config_json():
             else:
                 config[k] = val
     return json.dumps(config, indent=2, sort_keys=True)
+
+
+@st.cache_data(show_spinner=False)
+def load_group_receipt_events(msgstore_path, group_jid):
+    """
+    Load per-recipient read events for outgoing messages in a specific group.
+    Returns one earliest read event per (message_row_id, reader_jid).
+    """
+    cols = ['message_row_id', 'reader_jid', 'msg_timestamp', 'read_timestamp']
+
+    if not msgstore_path or not group_jid or not os.path.exists(msgstore_path):
+        return pd.DataFrame(columns=cols)
+
+    # Newer backups usually store per-member reads in receipt_user.
+    query_receipt_user = """
+    SELECT
+        m._id AS message_row_id,
+        m.timestamp AS message_ts,
+        jr.raw_string AS reader_jid,
+        ru.read_timestamp AS read_ts,
+        ru.played_timestamp AS played_ts
+    FROM receipt_user ru
+    JOIN message m ON ru.message_row_id = m._id
+    JOIN chat c ON m.chat_row_id = c._id
+    JOIN jid jg ON c.jid_row_id = jg._id
+    JOIN jid jr ON ru.receipt_user_jid_row_id = jr._id
+    WHERE jg.raw_string = ?
+      AND m.from_me = 1
+      AND (ru.read_timestamp > 0 OR ru.played_timestamp > 0)
+      AND jr.raw_string IS NOT NULL
+      AND TRIM(jr.raw_string) <> ''
+    """
+
+    # Legacy fallback in old backups.
+    query_receipts = """
+    SELECT
+        m._id AS message_row_id,
+        m.timestamp AS message_ts,
+        r.remote_resource AS reader_jid,
+        r.read_device_timestamp AS read_ts,
+        r.played_device_timestamp AS played_ts
+    FROM receipts r
+    JOIN message m ON r.key_id = m.key_id
+    JOIN chat c ON m.chat_row_id = c._id
+    JOIN jid j ON c.jid_row_id = j._id
+    WHERE j.raw_string = ?
+      AND m.from_me = 1
+      AND (r.read_device_timestamp > 0 OR r.played_device_timestamp > 0)
+      AND r.remote_resource IS NOT NULL
+      AND TRIM(r.remote_resource) <> ''
+    """
+
+    conn = None
+    try:
+        conn = sqlite3.connect(msgstore_path)
+        raw_user = pd.read_sql_query(query_receipt_user, conn, params=[group_jid])
+        raw_legacy = pd.read_sql_query(query_receipts, conn, params=[group_jid])
+        raw = pd.concat([raw_user, raw_legacy], ignore_index=True)
+    except Exception:
+        return pd.DataFrame(columns=cols)
+    finally:
+        if conn is not None:
+            conn.close()
+
+    if raw.empty:
+        return pd.DataFrame(columns=cols)
+
+    raw['read_ts'] = pd.to_numeric(raw['read_ts'], errors='coerce').where(lambda s: s > 0)
+    raw['played_ts'] = pd.to_numeric(raw['played_ts'], errors='coerce').where(lambda s: s > 0)
+    raw['event_ts'] = raw['read_ts'].fillna(raw['played_ts'])
+    raw = raw[raw['event_ts'].notna()].copy()
+
+    if raw.empty:
+        return pd.DataFrame(columns=cols)
+
+    raw['msg_timestamp'] = pd.to_datetime(pd.to_numeric(raw['message_ts'], errors='coerce'), unit='ms', errors='coerce')
+    raw['read_timestamp'] = pd.to_datetime(raw['event_ts'], unit='ms', errors='coerce')
+    raw = raw.dropna(subset=['msg_timestamp', 'read_timestamp', 'reader_jid'])
+
+    if raw.empty:
+        return pd.DataFrame(columns=cols)
+
+    # First read event per person per message.
+    raw = raw.sort_values('read_timestamp').drop_duplicates(subset=['message_row_id', 'reader_jid'], keep='first')
+    return raw[cols]
+
+
+@st.cache_data(show_spinner=False)
+def load_lid_jid_map(msgstore_path):
+    """
+    Load LID -> PN JID row-id mappings from msgstore jid_map.
+    Returns dict {lid_row_id: jid_row_id}.
+    """
+    if not msgstore_path or not os.path.exists(msgstore_path):
+        return {}
+
+    conn = None
+    try:
+        conn = sqlite3.connect(msgstore_path)
+        df_map = pd.read_sql_query(
+            "SELECT lid_row_id, jid_row_id, COALESCE(sort_id, 0) AS sort_id FROM jid_map",
+            conn
+        )
+    except Exception:
+        return {}
+    finally:
+        if conn is not None:
+            conn.close()
+
+    if df_map.empty:
+        return {}
+
+    df_map['lid_row_id'] = pd.to_numeric(df_map['lid_row_id'], errors='coerce')
+    df_map['jid_row_id'] = pd.to_numeric(df_map['jid_row_id'], errors='coerce')
+    df_map['sort_id'] = pd.to_numeric(df_map['sort_id'], errors='coerce').fillna(0)
+    df_map = df_map.dropna(subset=['lid_row_id', 'jid_row_id'])
+
+    if df_map.empty:
+        return {}
+
+    # Keep the newest mapping when duplicates exist.
+    df_map = df_map.sort_values('sort_id').drop_duplicates(subset=['lid_row_id'], keep='last')
+    return {int(r.lid_row_id): int(r.jid_row_id) for r in df_map.itertuples(index=False)}
 
 # Sidebar
 st.sidebar.header("Data Sources")
@@ -250,9 +374,20 @@ if 'data' in st.session_state:
     if len(date_range) == 2:
         mask = (df_base['timestamp'].dt.date >= date_range[0]) & (df_base['timestamp'].dt.date <= date_range[1])
         df_base = df_base.loc[mask]
+
+    # Dedicated group source: same global filters except "Exclude Groups"
+    # so Group Explorer remains usable even when groups are hidden elsewhere.
+    df_group_base = df_base.copy()
+    if 'is_group' not in df_group_base.columns:
+        if 'raw_string' in df_group_base.columns:
+            df_group_base['is_group'] = df_group_base['raw_string'].astype(str).str.endswith('@g.us')
+        else:
+            df_group_base['is_group'] = False
+
     if exclude_groups and 'raw_string' in df_base.columns:
         is_group = df_base['raw_string'].astype(str).str.endswith('@g.us')
         df_base = df_base[~is_group]
+
     if exclude_channels and 'raw_string' in df_base.columns:
         # Channels usually end in @newsletter. Status is status@broadcast. Official WA is 0@s.whatsapp.net
         is_channel = (
@@ -261,6 +396,13 @@ if 'data' in st.session_state:
             (df_base['raw_string'] == '0@s.whatsapp.net')
         )
         df_base = df_base[~is_channel]
+    if exclude_channels and 'raw_string' in df_group_base.columns:
+        is_channel_group = (
+            df_group_base['raw_string'].astype(str).str.endswith('@newsletter') |
+            (df_group_base['raw_string'] == 'status@broadcast') |
+            (df_group_base['raw_string'] == '0@s.whatsapp.net')
+        )
+        df_group_base = df_group_base[~is_channel_group]
     
     # System Messages (Type 7) - Already excluded above unconditionally
     # if exclude_system and 'message_type' in filtered_df.columns:
@@ -268,6 +410,7 @@ if 'data' in st.session_state:
         
     if exclude_family_global and family_list:
         df_base = df_base[~df_base['chat_name'].isin(family_list)]
+        df_group_base = df_group_base[~df_group_base['chat_name'].isin(family_list)]
     if exclude_non_contacts:
         # Remove those that appear to be just numbers
         mask_nums = df_base['contact_name'].apply(is_number)
@@ -306,7 +449,16 @@ if 'data' in st.session_state:
     col4.metric("Unique Contacts", unique_contacts_raw)
 
     # --- Tabs ---
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["📊 Activity & Top Users", "🔥 Behavioral Patterns", "👫 Gender Insights", "📝 Word Cloud", "🔍 Chat Explorer", "🎪 Fun & Insights", "🗺️ Map"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+        "📊 Activity & Top Users",
+        "🔥 Behavioral Patterns",
+        "👫 Gender Insights",
+        "📝 Word Cloud",
+        "🔍 Chat Explorer",
+        "👥 Group Explorer",
+        "🎪 Fun & Insights",
+        "🗺️ Map"
+    ])
 
     with tab1:
         col_l, col_r = st.columns(2)
@@ -1046,6 +1198,476 @@ if 'data' in st.session_state:
             st.dataframe(sub_df[cols_to_show].sort_values('timestamp', ascending=False).head(10))
 
     with tab6:
+        st.header("👥 Group Explorer & Member Comparison")
+        st.caption("Deep dive into group dynamics, member activity, reply speed, and read behavior.")
+
+        if 'is_group' not in df_group_base.columns:
+            st.info("Group metadata is unavailable in this dataset.")
+        else:
+            groups_df = df_group_base[df_group_base['is_group'] == True].copy()
+            groups_df = groups_df[groups_df['chat_name'].notnull()]
+            lid_to_pn_map = load_lid_jid_map(msgstore_path)
+
+            if groups_df.empty:
+                st.info("No groups found with current filters.")
+            else:
+                group_options = sorted(groups_df['chat_name'].astype(str).unique().tolist())
+                selected_group = st.selectbox("Select Group", group_options, key="grp_selected_group")
+
+                if selected_group:
+                    gdf = groups_df[groups_df['chat_name'] == selected_group].copy().sort_values('timestamp')
+
+                    if gdf.empty:
+                        st.info("No data for this group with current filters.")
+                    else:
+                        if 'read_at' not in gdf.columns:
+                            gdf['read_at'] = pd.NaT
+
+                        # Canonicalize participants with LID -> PN mapping to avoid split identities
+                        gdf['sender_jid_num'] = pd.to_numeric(gdf['sender_jid_row_id'], errors='coerce')
+                        gdf['canonical_sender_id'] = gdf['sender_jid_num']
+                        if lid_to_pn_map:
+                            mapped_ids = (
+                                gdf['sender_jid_num']
+                                .astype('Int64')
+                                .map(lid_to_pn_map)
+                            )
+                            gdf['canonical_sender_id'] = mapped_ids.fillna(gdf['sender_jid_num'])
+
+                        gdf.loc[gdf['from_me'] == 1, 'canonical_sender_id'] = -1
+
+                        # Pick best display label per canonical ID.
+                        def _label_has_letters(x):
+                            return bool(re.search(r'[A-Za-zÀ-ÿ]', str(x)))
+
+                        inbound = gdf[gdf['from_me'] == 0][['canonical_sender_id', 'contact_name', 'sender_string']].copy()
+                        inbound['candidate_name'] = inbound['contact_name'].fillna('').astype(str).str.strip()
+                        inbound.loc[inbound['candidate_name'].eq(''), 'candidate_name'] = inbound['sender_string'].fillna('').astype(str)
+                        inbound['has_letters'] = inbound['candidate_name'].apply(_label_has_letters)
+                        inbound['is_unknown'] = inbound['candidate_name'].str.lower().isin(['', 'unknown', 'none', 'nan'])
+
+                        label_counts = (
+                            inbound.groupby(['canonical_sender_id', 'candidate_name', 'has_letters', 'is_unknown'])
+                            .size()
+                            .reset_index(name='count')
+                            .sort_values(
+                                ['canonical_sender_id', 'has_letters', 'is_unknown', 'count'],
+                                ascending=[True, False, True, False]
+                            )
+                        )
+                        preferred_labels = (
+                            label_counts.drop_duplicates(subset=['canonical_sender_id'], keep='first')
+                            .set_index('canonical_sender_id')['candidate_name']
+                            .to_dict()
+                        )
+
+                        gdf['sender_label'] = gdf['canonical_sender_id'].map(preferred_labels)
+                        gdf.loc[gdf['from_me'] == 1, 'sender_label'] = 'You'
+                        missing_label = gdf['sender_label'].isna()
+                        gdf.loc[missing_label, 'sender_label'] = (
+                            gdf.loc[missing_label, 'contact_name']
+                            .fillna(gdf.loc[missing_label, 'sender_string'])
+                            .fillna('Unknown')
+                            .astype(str)
+                        )
+                        gdf['sender_label'] = gdf['sender_label'].astype(str)
+                        gdf['word_count'] = gdf['text_data'].fillna('').astype(str).str.split().str.len()
+
+                        participants = sorted(gdf[gdf['sender_label'] != 'You']['sender_label'].unique().tolist())
+                        active_days = gdf['timestamp'].dt.date.nunique()
+                        total_msgs = len(gdf)
+                        total_words = int(gdf['word_count'].sum())
+                        my_msgs = int((gdf['sender_label'] == 'You').sum())
+                        my_share = (my_msgs / total_msgs * 100) if total_msgs > 0 else 0
+
+                        m1, m2, m3, m4, m5 = st.columns(5)
+                        m1.metric("Group Messages", f"{total_msgs:,}")
+                        m2.metric("Participants", f"{len(participants):,}")
+                        m3.metric("Active Days", f"{active_days:,}")
+                        m4.metric("My Messages", f"{my_msgs:,}")
+                        m5.metric("My Share", f"{my_share:.1f}%")
+
+                        cfg1, cfg2, cfg3, cfg4 = st.columns(4)
+                        top_members_n = cfg1.slider("Top Members", 3, 25, 10, key="grp_top_members_n")
+                        grp_reply_thresh_h = cfg2.slider("Max Reply Delay (hours)", 1, 72, 12, key="grp_reply_thresh_h")
+                        grp_show_lines = cfg3.checkbox("Show as Lines", value=True, key="grp_show_lines")
+                        grp_show_cumulative = cfg4.checkbox("Show Cumulative", value=False, key="grp_show_cumulative")
+
+                        # ---- Member Rankings ----
+                        member_msg = gdf['sender_label'].value_counts().rename('Messages')
+                        member_words = gdf.groupby('sender_label')['word_count'].sum().rename('Words')
+                        avg_words = gdf.groupby('sender_label')['word_count'].mean().rename('Avg Words/Msg')
+
+                        # Reply speed: member replies after someone else in the same group.
+                        gdf['prev_sender'] = gdf['sender_label'].shift(1)
+                        gdf['prev_timestamp'] = gdf['timestamp'].shift(1)
+                        gdf['reply_seconds'] = (gdf['timestamp'] - gdf['prev_timestamp']).dt.total_seconds()
+
+                        reply_mask = (
+                            (gdf['sender_label'] != gdf['prev_sender']) &
+                            (gdf['reply_seconds'] >= 0) &
+                            (gdf['reply_seconds'] <= grp_reply_thresh_h * 3600)
+                        )
+                        reply_df = gdf[reply_mask].copy()
+                        reply_avg = (reply_df.groupby('sender_label')['reply_seconds'].mean() / 60).rename('Avg Reply (min)')
+                        reply_events = reply_df.groupby('sender_label').size().rename('Reply Events')
+
+                        # How long I take to read each member's messages.
+                        read_delay_df = gdf[(gdf['sender_label'] != 'You') & gdf['read_at'].notnull()].copy()
+                        read_delay_df['my_read_seconds'] = (read_delay_df['read_at'] - read_delay_df['timestamp']).dt.total_seconds()
+                        read_delay_df.loc[read_delay_df['my_read_seconds'].between(-60, 0), 'my_read_seconds'] = 0
+                        read_delay_df = read_delay_df[
+                            (read_delay_df['my_read_seconds'] >= 0) &
+                            (read_delay_df['my_read_seconds'] <= 7 * 24 * 3600)
+                        ]
+                        my_read_avg = (read_delay_df.groupby('sender_label')['my_read_seconds'].mean() / 60).rename('Avg My Read (min)')
+
+                        # How long each member takes to read MY group messages (per-recipient receipts).
+                        group_jids = gdf['raw_string'].dropna().astype(str)
+                        group_jid = group_jids.iloc[0] if not group_jids.empty else None
+                        receipt_events = load_group_receipt_events(msgstore_path, group_jid)
+
+                        member_read_avg = pd.Series(dtype='float64')
+                        member_read_events = pd.Series(dtype='int64')
+                        if not receipt_events.empty:
+                            jid_to_name = (
+                                gdf[['sender_string', 'sender_label']]
+                                .dropna(subset=['sender_string', 'sender_label'])
+                                .drop_duplicates('sender_string')
+                                .set_index('sender_string')['sender_label']
+                                .to_dict()
+                            )
+
+                            receipt_events = receipt_events.copy()
+                            receipt_events['member'] = receipt_events['reader_jid'].map(jid_to_name)
+                            missing_mask = receipt_events['member'].isna()
+                            receipt_events.loc[missing_mask, 'member'] = (
+                                receipt_events.loc[missing_mask, 'reader_jid']
+                                .astype(str)
+                                .str.split('@')
+                                .str[0]
+                            )
+
+                            receipt_events['their_read_seconds'] = (
+                                receipt_events['read_timestamp'] - receipt_events['msg_timestamp']
+                            ).dt.total_seconds()
+                            receipt_events.loc[
+                                receipt_events['their_read_seconds'].between(-60, 0), 'their_read_seconds'
+                            ] = 0
+                            receipt_events = receipt_events[
+                                (receipt_events['their_read_seconds'] >= 0) &
+                                (receipt_events['their_read_seconds'] <= 7 * 24 * 3600)
+                            ]
+                            receipt_events = receipt_events[receipt_events['member'].astype(str) != 'You']
+
+                            member_read_avg = (
+                                receipt_events.groupby('member')['their_read_seconds'].mean() / 60
+                            ).rename('Avg Their Read (min)')
+                            member_read_events = receipt_events.groupby('member').size().rename('Read Events')
+
+                        rankings = pd.DataFrame({'Messages': member_msg})
+                        rankings = rankings.join(member_words, how='left')
+                        rankings = rankings.join(avg_words, how='left')
+                        rankings = rankings.join(reply_avg, how='left')
+                        rankings = rankings.join(reply_events, how='left')
+                        rankings = rankings.join(my_read_avg, how='left')
+                        if not member_read_avg.empty:
+                            rankings = rankings.join(member_read_avg, how='left')
+                            rankings = rankings.join(member_read_events, how='left')
+                        else:
+                            rankings['Avg Their Read (min)'] = np.nan
+                            rankings['Read Events'] = 0
+
+                        rankings['Message Share %'] = (rankings['Messages'] / total_msgs * 100).round(2)
+                        rankings['Word Share %'] = (rankings['Words'] / max(total_words, 1) * 100).round(2)
+                        rankings = rankings.fillna({
+                            'Words': 0,
+                            'Avg Words/Msg': 0,
+                            'Avg Reply (min)': np.nan,
+                            'Reply Events': 0,
+                            'Avg My Read (min)': np.nan,
+                            'Avg Their Read (min)': np.nan,
+                            'Read Events': 0
+                        })
+                        rankings = rankings.sort_values('Messages', ascending=False)
+                        rankings.index.name = 'sender_label'
+
+                        unresolved_ids = [m for m in rankings.index.tolist() if str(m).isdigit()]
+                        if unresolved_ids:
+                            st.caption("Some members appear as numeric IDs (WhatsApp LID/contact-mapping limitation in backup data).")
+
+                        st.subheader("🏅 Member Rankings")
+                        st.caption("Includes message/word share, reply speed, and read-time metrics.")
+                        st.dataframe(rankings, use_container_width=True)
+
+                        # ---- Activity Comparison Over Time ----
+                        st.subheader("📈 Member Activity Over Time")
+                        recent_cutoff = gdf['timestamp'].max() - pd.DateOffset(months=6)
+                        recent_activity = (
+                            gdf[gdf['timestamp'] >= recent_cutoff]['sender_label']
+                            .value_counts()
+                        )
+                        recent_default = recent_activity.head(top_members_n).index.tolist()
+                        if 'You' in rankings.index and 'You' not in recent_default:
+                            recent_default = ['You'] + recent_default
+                        all_members = rankings.index.tolist()
+
+                        selected_timeline_members = st.multiselect(
+                            "Members to Plot",
+                            all_members,
+                            default=recent_default[:min(len(recent_default), len(all_members))],
+                            key="grp_timeline_members"
+                        )
+
+                        if not selected_timeline_members:
+                            selected_timeline_members = rankings.head(top_members_n).index.tolist()
+
+                        timeline_df = gdf[gdf['sender_label'].isin(selected_timeline_members)].copy()
+                        timeline = (
+                            timeline_df
+                            .set_index('timestamp')
+                            .groupby('sender_label')
+                            .resample('ME')
+                            .size()
+                            .unstack(level=0)
+                            .fillna(0)
+                        )
+                        if grp_show_cumulative:
+                            timeline = timeline.cumsum()
+
+                        if not timeline.empty:
+                            plot_func_group = px.line if grp_show_lines else px.area
+                            fig_group_timeline = plot_func_group(
+                                timeline,
+                                x=timeline.index,
+                                y=timeline.columns,
+                                title=f"Monthly Volume by Member ({'Cumulative' if grp_show_cumulative else 'Monthly'})",
+                                labels={'value': 'Messages', 'index': 'Month', 'variable': 'Member'}
+                            )
+                            st.plotly_chart(fig_group_timeline, width='stretch')
+                        else:
+                            st.info("Not enough data to plot member activity over time.")
+
+                        # ---- Hourly Comparison ----
+                        st.subheader("🕒 Hourly Member Activity")
+                        hourly_df = gdf[gdf['sender_label'].isin(selected_timeline_members)].copy()
+                        hourly = hourly_df.groupby([hourly_df['timestamp'].dt.hour, 'sender_label']).size().unstack(fill_value=0)
+                        if grp_show_cumulative and not hourly.empty:
+                            hourly = hourly.cumsum()
+
+                        if not hourly.empty:
+                            fig_hourly_group = px.line(
+                                hourly,
+                                x=hourly.index,
+                                y=hourly.columns,
+                                markers=True,
+                                title=f"Hourly Activity by Member ({'Cumulative' if grp_show_cumulative else 'Per Hour'})",
+                                labels={'value': 'Messages', 'index': 'Hour', 'variable': 'Member'}
+                            )
+                            st.plotly_chart(fig_hourly_group, width='stretch')
+                        else:
+                            st.info("Not enough data to plot hourly member activity.")
+
+                        # ---- Reply + Read Rankings ----
+                        rr1, rr2 = st.columns(2)
+
+                        with rr1:
+                            st.write("**⚡ Fastest Repliers**")
+                            if 'Avg Reply (min)' in rankings.columns and rankings['Avg Reply (min)'].notna().any():
+                                rep_rank = rankings.dropna(subset=['Avg Reply (min)']).sort_values('Avg Reply (min)').head(10)
+                                fig_rep_fast = px.bar(
+                                    rep_rank.reset_index(),
+                                    x='Avg Reply (min)',
+                                    y='sender_label',
+                                    orientation='h',
+                                    title="Lowest Avg Reply Delay",
+                                    labels={'sender_label': 'Member'}
+                                )
+                                fig_rep_fast.update_layout(yaxis={'categoryorder': 'total descending'})
+                                st.plotly_chart(fig_rep_fast, width='stretch')
+                            else:
+                                st.caption("Not enough reply events.")
+
+                        with rr2:
+                            st.write("**👀 Fastest Readers of My Messages**")
+                            if 'Avg Their Read (min)' in rankings.columns and rankings['Avg Their Read (min)'].notna().any():
+                                read_rank = rankings.dropna(subset=['Avg Their Read (min)']).sort_values('Avg Their Read (min)').head(10)
+                                fig_read_fast = px.bar(
+                                    read_rank.reset_index(),
+                                    x='Avg Their Read (min)',
+                                    y='sender_label',
+                                    orientation='h',
+                                    title="Lowest Avg Read Delay (Per Member)",
+                                    labels={'sender_label': 'Member'}
+                                )
+                                fig_read_fast.update_layout(yaxis={'categoryorder': 'total descending'})
+                                st.plotly_chart(fig_read_fast, width='stretch')
+                            else:
+                                st.caption("No per-member read receipts found for this group.")
+
+                        # ---- Response Time Distribution (Multi-Member) ----
+                        st.subheader("⏱️ Response Time Distribution")
+                        focus_members = rankings.index.tolist()
+                        if focus_members and not reply_df.empty:
+                            default_dist_members = focus_members[:min(5, len(focus_members))]
+                            selected_dist_members = st.multiselect(
+                                "Members for Distribution",
+                                focus_members,
+                                default=default_dist_members,
+                                key="grp_dist_members"
+                            )
+
+                            if selected_dist_members:
+                                dist_df = reply_df[reply_df['sender_label'].isin(selected_dist_members)].copy()
+                                if not dist_df.empty:
+                                    max_seconds = grp_reply_thresh_h * 3600
+                                    segments = [
+                                        (60, '<1m'),
+                                        (300, '1-5m'),
+                                        (900, '5-15m'),
+                                        (3600, '15m-1h'),
+                                        (14400, '1h-4h'),
+                                        (28800, '4h-8h'),
+                                        (max_seconds, f'>8h to {grp_reply_thresh_h}h')
+                                    ]
+                                    bins = [0]
+                                    labels = []
+                                    for edge, label in segments:
+                                        edge = min(edge, max_seconds)
+                                        if edge > bins[-1]:
+                                            bins.append(edge)
+                                            labels.append(label)
+
+                                    dist_df['bucket'] = pd.cut(
+                                        dist_df['reply_seconds'],
+                                        bins=bins,
+                                        labels=labels,
+                                        include_lowest=True,
+                                        duplicates='drop'
+                                    )
+
+                                    dist_counts = (
+                                        dist_df.groupby(['sender_label', 'bucket'], observed=False)
+                                        .size()
+                                        .reset_index(name='count')
+                                    )
+                                    fig_dist = px.bar(
+                                        dist_counts,
+                                        x='sender_label',
+                                        y='count',
+                                        color='bucket',
+                                        barmode='stack',
+                                        title="Reply Delay Buckets by Member",
+                                        labels={'sender_label': 'Member', 'count': 'Replies', 'bucket': 'Delay Bucket'}
+                                    )
+                                    st.plotly_chart(fig_dist, width='stretch')
+
+                                    summary = (
+                                        dist_df.groupby('sender_label')['reply_seconds']
+                                        .mean()
+                                        .div(60)
+                                        .rename('Avg Reply (min)')
+                                        .to_frame()
+                                    )
+                                    summary['Group Avg (min)'] = reply_df['reply_seconds'].mean() / 60
+                                    summary['Delta vs Group (min)'] = summary['Avg Reply (min)'] - summary['Group Avg (min)']
+                                    st.dataframe(summary.sort_values('Avg Reply (min)'), use_container_width=True)
+                                else:
+                                    st.caption("Not enough reply events for selected members.")
+                            else:
+                                st.caption("Select at least one member.")
+                        else:
+                            st.caption("Not enough reply events for distribution analysis.")
+
+                        # ---- Composition Comparison ----
+                        st.subheader("🧩 Message Composition by Member")
+                        members_for_comp = rankings.index.tolist()
+                        default_members = members_for_comp[:min(6, len(members_for_comp))]
+                        selected_comp_members = st.multiselect(
+                            "Members for Composition Chart",
+                            members_for_comp,
+                            default=default_members,
+                            key="grp_comp_members"
+                        )
+
+                        def categorize_group_msg(row):
+                            mime = str(row.get('mime_type', ''))
+                            if pd.isna(mime) or mime in ['', 'None']:
+                                return 'Text'
+                            if 'image/webp' in mime:
+                                return 'Sticker'
+                            if 'image' in mime:
+                                return 'Image'
+                            if 'video' in mime:
+                                return 'Video'
+                            if 'audio' in mime:
+                                return 'Audio'
+                            return 'Other'
+
+                        gdf['type_category'] = gdf.apply(categorize_group_msg, axis=1)
+
+                        if selected_comp_members:
+                            comp_df = (
+                                gdf[gdf['sender_label'].isin(selected_comp_members)]
+                                .groupby(['sender_label', 'type_category'])
+                                .size()
+                                .reset_index(name='count')
+                            )
+                            if not comp_df.empty:
+                                fig_comp = px.bar(
+                                    comp_df,
+                                    x='sender_label',
+                                    y='count',
+                                    color='type_category',
+                                    barmode='stack',
+                                    title="Message Type Mix by Member",
+                                    labels={'sender_label': 'Member', 'count': 'Messages', 'type_category': 'Type'}
+                                )
+                                st.plotly_chart(fig_comp, width='stretch')
+                            else:
+                                st.caption("No composition data for the selected members.")
+                        else:
+                            st.caption("Select at least one member.")
+
+                        # ---- Word Cloud Comparison ----
+                        st.subheader("📝 Member Word Cloud Comparison")
+                        all_member_choices = rankings.index.tolist()
+                        if len(all_member_choices) >= 1:
+                            wc1, wc2 = st.columns(2)
+                            member_a = wc1.selectbox("Member A", all_member_choices, key="grp_wc_member_a")
+                            member_b = wc2.selectbox("Member B", all_member_choices, index=min(1, len(all_member_choices)-1), key="grp_wc_member_b")
+
+                            if st.button("Generate Group Word Clouds", key="grp_generate_wc"):
+                                wc_col1, wc_col2 = st.columns(2)
+                                for col, member in [(wc_col1, member_a), (wc_col2, member_b)]:
+                                    member_text = " ".join(
+                                        gdf[gdf['sender_label'] == member]['text_data']
+                                        .dropna()
+                                        .astype(str)
+                                        .tolist()
+                                    )
+                                    with col:
+                                        st.caption(member)
+                                        if member_text.strip():
+                                            wc = WordCloud(width=450, height=300, background_color='white').generate(member_text)
+                                            plt.figure(figsize=(5, 4))
+                                            plt.imshow(wc, interpolation='bilinear')
+                                            plt.axis('off')
+                                            st.pyplot(plt)
+                                        else:
+                                            st.caption("No text data.")
+
+                        # ---- Recent Messages ----
+                        st.subheader("💬 Recent Group Messages")
+                        msg_cols = ['timestamp', 'sender_label', 'text_data']
+                        if 'mime_type' in gdf.columns:
+                            msg_cols.append('mime_type')
+                        st.dataframe(
+                            gdf[msg_cols].sort_values('timestamp', ascending=False).head(30),
+                            use_container_width=True
+                        )
+
+    with tab7:
         st.header("🎪 Fun & Insights")
         
         col_fun_ctrl1, col_fun_ctrl2 = st.columns(2)
@@ -1416,7 +2038,7 @@ if 'data' in st.session_state:
         
 
 
-    with tab7:
+    with tab8:
         st.header("🗺️ Location Map")
         loc_data = analyzer.get_location_data()
         if not loc_data.empty:
