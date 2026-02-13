@@ -17,3 +17,4 @@ venv
 TODO.*
 debug_*
 wa_report_output/
+wa_analyzer_config.json
