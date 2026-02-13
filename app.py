@@ -3,8 +3,11 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+import matplotlib.ticker as mticker
 import os
 import sqlite3
+import tempfile
 from wa_analyzer.src.parser import WhatsappParser
 from wa_analyzer.src.analyzer import WhatsappAnalyzer
 from wordcloud import WordCloud
@@ -45,6 +48,277 @@ def get_correlation_text(df):
                 correlations.append(f"**{cols[i]}** vs **{cols[j]}**: r={corr:.2f} {direction}")
     
     return " | ".join(correlations) if correlations else None
+
+
+def ease_in_out_cubic(alpha):
+    """
+    Smooth nonlinear interpolation for polished overtakes.
+    """
+    alpha = float(np.clip(alpha, 0.0, 1.0))
+    if alpha < 0.5:
+        return 4.0 * alpha ** 3
+    return 1.0 - ((-2.0 * alpha + 2.0) ** 3) / 2.0
+
+
+def build_three_month_rolling_counts(df_input, include_me=False, top_candidates=120):
+    """
+    Build day-by-day rolling 3-month message counts per contact.
+    """
+    required_cols = {'timestamp', 'contact_name'}
+    if df_input is None or df_input.empty or not required_cols.issubset(set(df_input.columns)):
+        return pd.DataFrame()
+
+    cols = ['timestamp', 'contact_name'] + (['from_me'] if 'from_me' in df_input.columns else [])
+    work = df_input[cols].copy()
+    work['timestamp'] = pd.to_datetime(work['timestamp'], errors='coerce')
+    work = work.dropna(subset=['timestamp', 'contact_name'])
+    work['contact_name'] = work['contact_name'].astype(str).str.strip()
+    work = work[work['contact_name'] != ""]
+
+    if not include_me and 'from_me' in work.columns:
+        work = work[work['from_me'] == 0]
+
+    if work.empty:
+        return pd.DataFrame()
+
+    work['date'] = work['timestamp'].dt.floor('D')
+    daily_counts = (
+        work.groupby(['date', 'contact_name'])
+        .size()
+        .unstack(fill_value=0)
+        .sort_index()
+    )
+
+    if daily_counts.empty:
+        return pd.DataFrame()
+
+    # Keep a broad candidate pool for performance while preserving likely overtakes.
+    if top_candidates and daily_counts.shape[1] > int(top_candidates):
+        keep_cols = daily_counts.sum(axis=0).sort_values(ascending=False).head(int(top_candidates)).index
+        daily_counts = daily_counts[keep_cols]
+
+    full_days = pd.date_range(daily_counts.index.min(), daily_counts.index.max(), freq='D')
+    daily_counts = daily_counts.reindex(full_days, fill_value=0)
+
+    # Exact calendar 3-month rolling window per day.
+    indexer = pd.api.indexers.VariableOffsetWindowIndexer(
+        index=daily_counts.index,
+        offset=pd.DateOffset(months=3)
+    )
+    rolling_counts = daily_counts.rolling(window=indexer, min_periods=1).sum()
+    rolling_counts = rolling_counts.loc[:, rolling_counts.max(axis=0) > 0]
+    rolling_counts.index.name = "date"
+    return rolling_counts.astype(float)
+
+
+def render_contact_race_video(
+    rolling_counts,
+    top_k=10,
+    fps=15,
+    seconds_per_month=2.0,
+    width=1280,
+    height=720
+):
+    """
+    Render a dynamic top-N bar chart race video from rolling contact counts.
+    Returns dict with bytes, mime, filename, frame_count.
+    """
+    if rolling_counts is None or rolling_counts.empty:
+        raise ValueError("No rolling data to render.")
+
+    data = rolling_counts.copy().sort_index()
+    if data.shape[1] == 0:
+        raise ValueError("No contacts available after filtering.")
+
+    values = data.to_numpy(dtype=float)
+    names = data.columns.astype(str).to_numpy()
+    n_days, n_contacts = values.shape
+
+    # Stable rank snapshots used for smooth vertical motion between days.
+    ranks = np.empty_like(values)
+    for i in range(n_days):
+        order = np.argsort(-values[i], kind='mergesort')
+        ranks[i, order] = np.arange(n_contacts)
+
+    top_k = max(1, min(int(top_k), n_contacts))
+    day_top_max = np.partition(values, -top_k, axis=1)[:, -top_k:].max(axis=1)
+    global_max = max(float(day_top_max.max()), 1.0)
+
+    # Required pacing: ~1 month every 2 seconds at 15 fps.
+    days_per_frame = 30.4375 / (fps * seconds_per_month)
+    total_frames = max(1, int(np.ceil((max(n_days - 1, 0)) / max(days_per_frame, 1e-9))) + 1)
+    timeline = np.linspace(0.0, max(n_days - 1, 0), total_frames)
+
+    # High-contrast palette for a polished race look.
+    palette_vals = np.linspace(0.08, 0.92, n_contacts)
+    palette = plt.cm.turbo(palette_vals)
+    color_lookup = {name: palette[i] for i, name in enumerate(names)}
+
+    fig, ax = plt.subplots(figsize=(width / 100, height / 100), dpi=100)
+    fig.patch.set_facecolor('#05070f')
+
+    def style_axes(x_lim):
+        ax.set_facecolor('#0b1220')
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        ax.grid(axis='x', color='#334155', alpha=0.32, linewidth=1)
+        ax.tick_params(axis='x', colors='#94a3b8', labelsize=10)
+        ax.tick_params(axis='y', length=0)
+        ax.xaxis.set_major_formatter(mticker.StrMethodFormatter('{x:,.0f}'))
+        ax.set_xlim(0, max(x_lim, 1))
+        ax.set_ylim(top_k - 0.35, -0.65)
+        ax.set_yticks([])
+        ax.set_xlabel("Messages in rolling 3-month window", color='#cbd5e1', fontsize=11)
+
+    def draw_frame(frame_idx):
+        t = float(timeline[frame_idx])
+        i0 = int(np.floor(t))
+        i1 = min(i0 + 1, n_days - 1)
+        eased = ease_in_out_cubic(t - i0)
+
+        frame_values = values[i0] * (1.0 - eased) + values[i1] * eased
+        frame_pos = ranks[i0] * (1.0 - eased) + ranks[i1] * eased
+
+        # Show only the leaders plus a few near-threshold bars to make entries smoother.
+        keep_n = min(top_k + 3, n_contacts)
+        visible = np.argsort(frame_pos)[:keep_n]
+        visible = visible[np.argsort(frame_pos[visible])]
+        draw_ids = visible[:top_k]
+
+        bar_vals = frame_values[draw_ids]
+        bar_pos = frame_pos[draw_ids]
+        bar_names = names[draw_ids]
+
+        day_max = day_top_max[i0] * (1.0 - eased) + day_top_max[i1] * eased
+        x_max = max(day_max * 1.18, global_max * 0.2, 1.0)
+
+        ax.cla()
+        style_axes(x_max)
+
+        ax.barh(
+            bar_pos,
+            bar_vals,
+            height=0.78,
+            color=[color_lookup[n] for n in bar_names],
+            edgecolor='none',
+            alpha=0.95
+        )
+
+        label_pad = 0.012 * x_max
+        for y, x, name in zip(bar_pos, bar_vals, bar_names):
+            ax.text(
+                x + label_pad,
+                y,
+                f"{name}  {int(round(x)):,}",
+                va='center',
+                ha='left',
+                color='white',
+                fontsize=10,
+                fontweight='bold'
+            )
+
+        current_day = data.index[i0] + pd.to_timedelta(t - i0, unit='D')
+        window_start = current_day - pd.DateOffset(months=3)
+
+        ax.text(
+            0.01,
+            1.06,
+            "Top 10 Contacts • 3-Month Rolling Message Race",
+            transform=ax.transAxes,
+            ha='left',
+            va='bottom',
+            color='white',
+            fontsize=17,
+            fontweight='bold'
+        )
+        ax.text(
+            0.01,
+            1.00,
+            current_day.strftime('%b %Y'),
+            transform=ax.transAxes,
+            ha='left',
+            va='top',
+            color='#22d3ee',
+            fontsize=13,
+            fontweight='bold'
+        )
+        ax.text(
+            0.99,
+            1.03,
+            f"Window: {window_start.strftime('%b %d, %Y')} to {current_day.strftime('%b %d, %Y')}",
+            transform=ax.transAxes,
+            ha='right',
+            va='top',
+            color='#e2e8f0',
+            fontsize=10,
+            bbox=dict(facecolor='#0f172a', edgecolor='none', alpha=0.82, boxstyle='round,pad=0.32')
+        )
+        ax.text(
+            0.99,
+            0.97,
+            f"{fps} fps • 1 month ≈ {seconds_per_month:.1f}s",
+            transform=ax.transAxes,
+            ha='right',
+            va='top',
+            color='#94a3b8',
+            fontsize=9
+        )
+
+    anim = animation.FuncAnimation(
+        fig,
+        draw_frame,
+        frames=total_frames,
+        interval=1000 / fps,
+        repeat=False,
+        blit=False
+    )
+
+    tmp_mp4 = None
+    tmp_gif = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as handle:
+            tmp_mp4 = handle.name
+
+        writer = animation.FFMpegWriter(
+            fps=fps,
+            codec='libx264',
+            bitrate=3200,
+            extra_args=['-pix_fmt', 'yuv420p']
+        )
+        anim.save(tmp_mp4, writer=writer, dpi=100)
+
+        with open(tmp_mp4, 'rb') as f:
+            return {
+                'bytes': f.read(),
+                'mime': 'video/mp4',
+                'filename': 'contact_race_3month.mp4',
+                'frame_count': total_frames
+            }
+    except Exception as mp4_err:
+        with tempfile.NamedTemporaryFile(suffix=".gif", delete=False) as handle:
+            tmp_gif = handle.name
+
+        try:
+            gif_writer = animation.PillowWriter(fps=min(15, fps))
+            anim.save(tmp_gif, writer=gif_writer, dpi=100)
+            with open(tmp_gif, 'rb') as f:
+                return {
+                    'bytes': f.read(),
+                    'mime': 'image/gif',
+                    'filename': 'contact_race_3month.gif',
+                    'frame_count': total_frames,
+                    'fallback_reason': str(mp4_err)
+                }
+        except Exception as gif_err:
+            raise RuntimeError(
+                f"Video export failed (MP4 and GIF). MP4 error: {mp4_err}; GIF error: {gif_err}"
+            )
+    finally:
+        plt.close(fig)
+        if tmp_mp4 and os.path.exists(tmp_mp4):
+            os.remove(tmp_mp4)
+        if tmp_gif and os.path.exists(tmp_gif):
+            os.remove(tmp_gif)
 
 # ... (imports)
 
@@ -664,6 +938,96 @@ if 'data' in st.session_state:
 
         else:
             st.info("Not enough data to calculate dispersion.")
+
+        st.divider()
+        st.subheader("🎬 3-Month Rolling Contact Race Video")
+        st.caption(
+            "Dynamic top-10 bar chart race using day-by-day counts in a rolling 3-month window. "
+            "Rendered at 15 fps with smooth nonlinear overtaking (1 month ≈ 2 seconds)."
+        )
+
+        race_c1, race_c2, race_c3 = st.columns(3)
+        include_me_race = race_c1.checkbox(
+            "Include my own messages",
+            value=False,
+            key="race_include_me",
+            help="Off by default to focus on contact-vs-contact dynamics."
+        )
+        candidate_pool = race_c2.slider(
+            "Candidate contact pool",
+            min_value=20,
+            max_value=300,
+            value=120,
+            step=10,
+            key="race_candidate_pool",
+            help="Larger pools capture more late overtakes but render slower."
+        )
+        quality = race_c3.selectbox(
+            "Video quality",
+            ["Preview (960x540)", "HD (1280x720)", "Full HD (1920x1080)"],
+            index=1,
+            key="race_video_quality"
+        )
+
+        if st.button("Generate Bar Chart Race Video", key="race_video_generate"):
+            with st.spinner("Rendering race video... this may take a while on large date ranges."):
+                rolling_counts = build_three_month_rolling_counts(
+                    df_base,
+                    include_me=include_me_race,
+                    top_candidates=candidate_pool
+                )
+
+                if rolling_counts.empty:
+                    st.warning("No usable activity found for the race video with current filters.")
+                    st.session_state.pop('race_video_payload', None)
+                else:
+                    dims = {
+                        "Preview (960x540)": (960, 540),
+                        "HD (1280x720)": (1280, 720),
+                        "Full HD (1920x1080)": (1920, 1080)
+                    }
+                    width, height = dims[quality]
+                    payload = render_contact_race_video(
+                        rolling_counts=rolling_counts,
+                        top_k=10,
+                        fps=15,
+                        seconds_per_month=2.0,
+                        width=width,
+                        height=height
+                    )
+                    months_span = max(
+                        (rolling_counts.index.max() - rolling_counts.index.min()).days / 30.4375,
+                        0
+                    )
+                    payload['date_start'] = rolling_counts.index.min().strftime('%Y-%m-%d')
+                    payload['date_end'] = rolling_counts.index.max().strftime('%Y-%m-%d')
+                    payload['contacts_count'] = int(rolling_counts.shape[1])
+                    payload['approx_seconds'] = months_span * 2.0
+                    payload['quality'] = quality
+                    st.session_state['race_video_payload'] = payload
+
+        race_payload = st.session_state.get('race_video_payload')
+        if race_payload:
+            if race_payload.get('mime') == 'video/mp4':
+                st.video(race_payload['bytes'])
+            else:
+                st.image(race_payload['bytes'])
+                if race_payload.get('fallback_reason'):
+                    st.caption(f"MP4 not available, used GIF fallback: {race_payload['fallback_reason']}")
+
+            st.download_button(
+                "Download Race Video",
+                data=race_payload['bytes'],
+                file_name=race_payload.get('filename', 'contact_race_3month.mp4'),
+                mime=race_payload.get('mime', 'video/mp4'),
+                key="race_video_download"
+            )
+            st.caption(
+                f"Data range: {race_payload.get('date_start')} to {race_payload.get('date_end')} • "
+                f"Contacts considered: {race_payload.get('contacts_count', 0)} • "
+                f"Frames: {race_payload.get('frame_count', 0):,} • "
+                f"Approx length: {race_payload.get('approx_seconds', 0):.1f}s"
+            )
         
     with tab2:
 
