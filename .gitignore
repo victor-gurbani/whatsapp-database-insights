@@ -17,5 +17,11 @@ venv
 
 TODO.*
 debug_*
+verify_*
+reproduce_issue.*
+inspect_schema.*
 wa_report_output/
 wa_analyzer_config.json
+
+
+.vscode/
