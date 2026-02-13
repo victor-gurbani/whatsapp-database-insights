@@ -5,9 +5,11 @@ import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import matplotlib.ticker as mticker
+import matplotlib.colors as mcolors
 import os
 import sqlite3
 import tempfile
+import hashlib
 from wa_analyzer.src.parser import WhatsappParser
 from wa_analyzer.src.analyzer import WhatsappAnalyzer
 from wordcloud import WordCloud
@@ -60,31 +62,118 @@ def ease_in_out_cubic(alpha):
     return 1.0 - ((-2.0 * alpha + 2.0) ** 3) / 2.0
 
 
-def build_three_month_rolling_counts(df_input, include_me=False, top_candidates=120):
+def build_distinct_color_map(names):
     """
-    Build day-by-day rolling 3-month message counts per contact.
+    Build a stable, high-contrast color map so top bars remain visually distinct.
+    """
+    names = [str(n) for n in names]
+    if not names:
+        return {}
+
+    # Hash-sort names so color assignment stays stable across runs and pool changes.
+    ordered = sorted(names, key=lambda n: hashlib.sha1(n.encode('utf-8')).hexdigest())
+    golden = 0.618033988749895
+    hue = 0.13
+    sat_cycle = [0.90, 0.78, 0.86]
+    val_cycle = [0.96, 0.84]
+
+    cmap = {}
+    for i, name in enumerate(ordered):
+        hue = (hue + golden) % 1.0
+        sat = sat_cycle[i % len(sat_cycle)]
+        val = val_cycle[(i // len(sat_cycle)) % len(val_cycle)]
+        cmap[name] = mcolors.hsv_to_rgb((hue, sat, val))
+
+    return cmap
+
+
+def build_three_month_rolling_counts(
+    df_input,
+    count_mode='their_only',
+    average_my_messages=False,
+    top_candidates=120,
+    time_bin='D'
+):
+    """
+    Build rolling 3-month message counts per contact using configurable counting mode.
+    count_mode:
+    - 'their_only': incoming messages only.
+    - 'chat_total': incoming + my messages mapped to counterpart chat.
     """
     required_cols = {'timestamp', 'contact_name'}
     if df_input is None or df_input.empty or not required_cols.issubset(set(df_input.columns)):
         return pd.DataFrame()
 
-    cols = ['timestamp', 'contact_name'] + (['from_me'] if 'from_me' in df_input.columns else [])
+    cols = ['timestamp', 'contact_name']
+    if 'from_me' in df_input.columns:
+        cols.append('from_me')
+    if 'chat_name' in df_input.columns:
+        cols.append('chat_name')
+
     work = df_input[cols].copy()
     work['timestamp'] = pd.to_datetime(work['timestamp'], errors='coerce')
     work = work.dropna(subset=['timestamp', 'contact_name'])
     work['contact_name'] = work['contact_name'].astype(str).str.strip()
     work = work[work['contact_name'] != ""]
 
-    if not include_me and 'from_me' in work.columns:
-        work = work[work['from_me'] == 0]
+    if count_mode not in {'their_only', 'chat_total'}:
+        count_mode = 'their_only'
+
+    if count_mode == 'their_only':
+        if 'from_me' in work.columns:
+            work = work[work['from_me'] == 0]
+        work['entity_name'] = work['contact_name']
+        work['weight'] = 1.0
+    else:
+        if 'from_me' in work.columns:
+            if 'chat_name' in work.columns:
+                work['entity_name'] = np.where(
+                    work['from_me'] == 1,
+                    work['chat_name'].fillna(''),
+                    work['contact_name'].fillna('')
+                )
+            else:
+                work['entity_name'] = work['contact_name']
+        else:
+            work['entity_name'] = work['contact_name']
+
+        work['entity_name'] = work['entity_name'].astype(str).str.strip()
+        work = work[work['entity_name'] != ""]
+        work = work[~work['entity_name'].str.lower().isin(['you', 'me', 'myself'])]
+        work['weight'] = 1.0
+
+        # Optional: dilute my outgoing influence by the number of people spoken with that day.
+        if average_my_messages and 'from_me' in work.columns:
+            outgoing_mask = work['from_me'] == 1
+            if outgoing_mask.any():
+                work['active_day'] = work['timestamp'].dt.floor('D')
+                day_people = (
+                    work.loc[outgoing_mask, ['active_day', 'entity_name']]
+                    .drop_duplicates()
+                    .groupby('active_day')
+                    .size()
+                    .astype(float)
+                )
+                divisors = (
+                    work.loc[outgoing_mask, 'active_day']
+                    .map(day_people)
+                    .replace(0, np.nan)
+                    .fillna(1.0)
+                )
+                work.loc[outgoing_mask, 'weight'] = 1.0 / divisors
 
     if work.empty:
         return pd.DataFrame()
 
-    work['date'] = work['timestamp'].dt.floor('D')
+    try:
+        work['bucket'] = work['timestamp'].dt.floor(time_bin)
+    except Exception:
+        time_bin = 'D'
+        work['bucket'] = work['timestamp'].dt.floor(time_bin)
+
     daily_counts = (
-        work.groupby(['date', 'contact_name'])
-        .size()
+        work.groupby(['bucket', 'entity_name'])['weight']
+        .sum()
         .unstack(fill_value=0)
         .sort_index()
     )
@@ -97,7 +186,7 @@ def build_three_month_rolling_counts(df_input, include_me=False, top_candidates=
         keep_cols = daily_counts.sum(axis=0).sort_values(ascending=False).head(int(top_candidates)).index
         daily_counts = daily_counts[keep_cols]
 
-    full_days = pd.date_range(daily_counts.index.min(), daily_counts.index.max(), freq='D')
+    full_days = pd.date_range(daily_counts.index.min(), daily_counts.index.max(), freq=time_bin)
     daily_counts = daily_counts.reindex(full_days, fill_value=0)
 
     # Exact calendar 3-month rolling window per day.
@@ -132,11 +221,11 @@ def render_contact_race_video(
 
     values = data.to_numpy(dtype=float)
     names = data.columns.astype(str).to_numpy()
-    n_days, n_contacts = values.shape
+    n_steps, n_contacts = values.shape
 
     # Stable rank snapshots used for smooth vertical motion between days.
     ranks = np.empty_like(values)
-    for i in range(n_days):
+    for i in range(n_steps):
         order = np.argsort(-values[i], kind='mergesort')
         ranks[i, order] = np.arange(n_contacts)
 
@@ -144,15 +233,20 @@ def render_contact_race_video(
     day_top_max = np.partition(values, -top_k, axis=1)[:, -top_k:].max(axis=1)
     global_max = max(float(day_top_max.max()), 1.0)
 
+    if n_steps > 1:
+        deltas_days = np.diff(data.index.view('int64')) / (24 * 60 * 60 * 1e9)
+        positive = deltas_days[deltas_days > 0]
+        step_days = float(np.median(positive)) if positive.size else 1.0
+    else:
+        step_days = 1.0
+
     # Required pacing: ~1 month every 2 seconds at 15 fps.
     days_per_frame = 30.4375 / (fps * seconds_per_month)
-    total_frames = max(1, int(np.ceil((max(n_days - 1, 0)) / max(days_per_frame, 1e-9))) + 1)
-    timeline = np.linspace(0.0, max(n_days - 1, 0), total_frames)
+    steps_per_frame = days_per_frame / max(step_days, 1e-9)
+    total_frames = max(1, int(np.ceil((max(n_steps - 1, 0)) / max(steps_per_frame, 1e-9))) + 1)
+    timeline = np.linspace(0.0, max(n_steps - 1, 0), total_frames)
 
-    # High-contrast palette for a polished race look.
-    palette_vals = np.linspace(0.08, 0.92, n_contacts)
-    palette = plt.cm.turbo(palette_vals)
-    color_lookup = {name: palette[i] for i, name in enumerate(names)}
+    color_lookup = build_distinct_color_map(names)
 
     fig, ax = plt.subplots(figsize=(width / 100, height / 100), dpi=100)
     fig.patch.set_facecolor('#05070f')
@@ -173,7 +267,7 @@ def render_contact_race_video(
     def draw_frame(frame_idx):
         t = float(timeline[frame_idx])
         i0 = int(np.floor(t))
-        i1 = min(i0 + 1, n_days - 1)
+        i1 = min(i0 + 1, n_steps - 1)
         eased = ease_in_out_cubic(t - i0)
 
         frame_values = values[i0] * (1.0 - eased) + values[i1] * eased
@@ -217,8 +311,9 @@ def render_contact_race_video(
                 fontweight='bold'
             )
 
-        current_day = data.index[i0] + pd.to_timedelta(t - i0, unit='D')
+        current_day = data.index[i0] + pd.to_timedelta((t - i0) * step_days, unit='D')
         window_start = current_day - pd.DateOffset(months=3)
+        range_fmt = '%b %d, %Y' if step_days >= 1 else '%b %d, %Y %H:%M'
 
         ax.text(
             0.01,
@@ -234,7 +329,7 @@ def render_contact_race_video(
         ax.text(
             0.01,
             1.00,
-            current_day.strftime('%b %Y'),
+            current_day.strftime('%b %d, %Y'),
             transform=ax.transAxes,
             ha='left',
             va='top',
@@ -245,7 +340,7 @@ def render_contact_race_video(
         ax.text(
             0.99,
             1.03,
-            f"Window: {window_start.strftime('%b %d, %Y')} to {current_day.strftime('%b %d, %Y')}",
+            f"Window: {window_start.strftime(range_fmt)} to {current_day.strftime(range_fmt)}",
             transform=ax.transAxes,
             ha='right',
             va='top',
