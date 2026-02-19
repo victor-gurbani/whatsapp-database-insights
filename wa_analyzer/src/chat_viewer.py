@@ -248,8 +248,9 @@ def generate_chat_html(
         group_html.append(
             f'<div class="wa-collapse-block" id="collapse-btn-{collapse_group_id}" onclick="expandCollapseGroup({collapse_group_id}, {total})" style="display: flex; align-items: center; justify-content: center; gap: 6px;">'
         )
+        expand_amt = min(5, total)
         group_html.append(
-            f'<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg> <span>{total} replied-to messages collapsed. Click to expand 5.</span>'
+            f'<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg> <span>{total} context messages collapsed. Click to expand {expand_amt}.</span>'
         )
         group_html.append("</div>")
 
@@ -331,7 +332,9 @@ def generate_chat_html(
 
         msg_html = "\n".join(msg_html_parts)
 
-        if collapse_replies and idx in reply_target_indices:
+        if collapse_replies and (
+            idx in reply_target_indices or idx in highlight_indices
+        ):
             collapse_buffer.append(msg_html)
         else:
             if collapse_buffer:
@@ -462,7 +465,8 @@ def generate_chat_html(
                 btn.style.display = 'none';
             } else {
                 var remaining = totalCount - toShow;
-                btn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg> <span>' + remaining + ' more hidden. Click to expand 5.</span>';
+                var nextExpand = Math.min(5, remaining);
+                btn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg> <span>' + remaining + ' more hidden. Click to expand ' + nextExpand + '.</span>';
             }
         }
         
