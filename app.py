@@ -16,6 +16,7 @@ from wa_analyzer.src.chat_viewer import (
     generate_chat_html,
     export_chat_json,
     export_chat_txt,
+    export_chat_html_standalone,
 )
 from wordcloud import WordCloud
 
@@ -3858,6 +3859,24 @@ if "data" in st.session_state:
                         help="Groups consecutive messages that were explicitly replied to. You can click to expand them in chunks of 5.",
                     )
 
+                st.markdown("<br>", unsafe_allow_html=True)
+                col_p1, col_p2 = st.columns(2)
+                with col_p1:
+                    enable_virtualization = st.toggle(
+                        "Enable JS Virtualization (Fast)",
+                        value=True,
+                        help="Significantly speeds up the browser by only rendering messages currently visible on screen. Recommended for large chats.",
+                    )
+                with col_p2:
+                    max_messages_limit = st.number_input(
+                        "Max Messages to Load",
+                        min_value=100,
+                        max_value=1000000,
+                        value=10000,
+                        step=1000,
+                        help="Limits the total number of messages loaded into the viewer to prevent memory crashes.",
+                    )
+
                 st.markdown(
                     """
                     <div style="font-size:0.85rem; padding: 10px; background-color: rgba(255,255,255,0.05); border-radius: 5px; margin-bottom: 10px; line-height: 1.8;">
@@ -3874,9 +3893,10 @@ if "data" in st.session_state:
 
                 chat_df = df_raw[df_raw["chat_name"] == selected_preview_chat].copy()
                 chat_df = chat_df.sort_values("timestamp").reset_index(drop=True)
+                chat_df = chat_df.tail(int(max_messages_limit)).reset_index(drop=True)
 
                 st.subheader("📥 Export Chat")
-                col_dl1, col_dl2 = st.columns([1, 1])
+                col_dl1, col_dl2, col_dl3 = st.columns(3)
                 with col_dl1:
                     json_data = export_chat_json(chat_df)
                     st.download_button(
@@ -3893,6 +3913,23 @@ if "data" in st.session_state:
                         file_name=f"{selected_preview_chat}_export.txt",
                         mime="text/plain",
                     )
+                with col_dl3:
+                    html_standalone = export_chat_html_standalone(
+                        chat_df=chat_df,
+                        flip_sides=flip_sides,
+                        adv_replies=adv_replies,
+                        msgs_above=adv_msgs_above,
+                        msgs_below=adv_msgs_below,
+                        context_view=context_view,
+                        collapse_replies=collapse_replies,
+                        virtualization=enable_virtualization,
+                    )
+                    st.download_button(
+                        label="Download as Standalone HTML",
+                        data=html_standalone,
+                        file_name=f"{selected_preview_chat}_viewer.html",
+                        mime="text/html",
+                    )
 
                 st.divider()
                 st.subheader("💬 Chat Preview")
@@ -3905,6 +3942,7 @@ if "data" in st.session_state:
                     msgs_below=adv_msgs_below,
                     context_view=context_view,
                     collapse_replies=collapse_replies,
+                    virtualization=enable_virtualization,
                 )
 
                 st.components.v1.html(html_output, height=620, scrolling=False)
