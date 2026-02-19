@@ -369,6 +369,19 @@ def generate_chat_html(
             }, 10);
         }
 
+        function scrollToBottomInstant() {
+            container.scrollTop = container.scrollHeight;
+            requestAnimationFrame(() => {
+                container.scrollTop = container.scrollHeight;
+            });
+            setTimeout(() => {
+                container.scrollTop = container.scrollHeight;
+            }, 50);
+            setTimeout(() => {
+                container.scrollTop = container.scrollHeight;
+            }, 150);
+        }
+
         function initChat() {
             renderAnchor.innerHTML = "";
             collapseBuffer = [];
@@ -380,12 +393,12 @@ def generate_chat_html(
                 renderedStartIndex = Math.max(0, total - INITIAL_CHUNK_SIZE);
                 renderedEndIndex = renderedStartIndex;
                 renderMessages(renderedStartIndex, total, false);
-                container.scrollTop = container.scrollHeight;
+                scrollToBottomInstant();
             } else {
                 renderedStartIndex = 0;
                 renderedEndIndex = 0;
                 renderMessages(0, total, false);
-                container.scrollTop = container.scrollHeight;
+                scrollToBottomInstant();
             }
             
             if (VIRTUALIZATION_ENABLED && !currentSearchQuery && window.IntersectionObserver) {
