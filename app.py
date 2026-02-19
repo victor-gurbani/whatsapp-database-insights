@@ -3850,7 +3850,7 @@ if "data" in st.session_state:
                     context_view = st.toggle(
                         "Context/Unreplied View",
                         value=False,
-                        help="Highlights consecutive messages (in Pink) that were left 'unreplied' before the other person changed the topic or responded without explicitly quoting.",
+                        help="Highlights consecutive messages (in Pink) that were implicitly replied to. This happens when someone responds directly without explicitly quoting.",
                     )
                     collapse_replies = st.toggle(
                         "Collapse Replied-To Messages",
@@ -3860,13 +3860,13 @@ if "data" in st.session_state:
 
                 st.markdown(
                     """
-                    <div style="font-size:0.85rem; padding: 10px; background-color: rgba(255,255,255,0.05); border-radius: 5px; margin-bottom: 10px;">
-                        <b>🎨 Color Legend:</b> 
-                        <span style="display:inline-block; margin-right: 15px;">🟩 <b>Green</b>: Me</span>
-                        <span style="display:inline-block; margin-right: 15px;">⬜ <b>White</b>: Them</span>
-                        <span style="display:inline-block; margin-right: 15px;">🟧 <b>Orange Highlight</b>: Message that received a reply</span>
-                        <span style="display:inline-block; margin-right: 15px;">🟦 <b>Blue Dashed</b>: Context around a replied message</span>
-                        <span style="display:inline-block;">🟪 <b>Pink Highlight</b>: Unreplied context</span>
+                    <div style="font-size:0.85rem; padding: 10px; background-color: rgba(255,255,255,0.05); border-radius: 5px; margin-bottom: 10px; line-height: 1.8;">
+                        <span style="display:inline-block; margin-right: 15px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: text-bottom;"><circle cx="12" cy="12" r="10" fill="#dcf8c6"></circle></svg> <b>Green</b>: Me</span>
+                        <span style="display:inline-block; margin-right: 15px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: text-bottom;"><circle cx="12" cy="12" r="10" fill="#ffffff"></circle></svg> <b>White</b>: Them</span>
+                        <span style="display:inline-block; margin-right: 15px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ff9800" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: text-bottom;"><circle cx="12" cy="12" r="10" fill="#fff3e0"></circle></svg> <b>Orange Highlight</b>: Explicitly Replied To</span>
+                        <span style="display:inline-block; margin-right: 15px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#03a9f4" stroke-width="2" stroke-dasharray="4" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: text-bottom;"><circle cx="12" cy="12" r="10" fill="none"></circle></svg> <b>Blue Dashed</b>: Surrounding Context</span>
+                        <span style="display:inline-block; margin-right: 15px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#e91e63" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: text-bottom;"><circle cx="12" cy="12" r="10" fill="#fce4ec"></circle></svg> <b>Pink Highlight</b>: Implicit Reply Context</span>
+                        <span style="display:inline-block;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="gray" stroke-width="2" stroke-dasharray="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: text-bottom;"><circle cx="12" cy="12" r="10" fill="transparent"></circle></svg> <b>Unmarked</b>: Unreplied / Ignored</span>
                     </div>
                     """,
                     unsafe_allow_html=True,

@@ -212,13 +212,15 @@ def generate_chat_html(
 
     html_parts = [css, '<div class="wa-container" id="wa-chat-container">']
 
-    # Buttons
     html_parts.append("""
-    <button class="wa-floating-btn" id="btn-scroll-down" onclick="scrollToBottom()" title="Scroll to Bottom">⬇️</button>
-    <button class="wa-floating-btn" id="btn-scroll-unreplied" onclick="scrollToLastUnreplied()" title="Go to Last Unreplied Context">🔍</button>
+    <button class="wa-floating-btn" id="btn-scroll-down" onclick="scrollToBottom()" title="Scroll to Bottom">
+        <svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="19 12 12 19 5 12"></polyline></svg>
+    </button>
+    <button class="wa-floating-btn" id="btn-scroll-unreplied" onclick="scrollToPrevUnrepliedBlock()" title="Go to Previous Unreplied Message">
+        <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+    </button>
     """)
 
-    # For mapping row_id to text for the reply box
     id_to_text = {}
     id_to_sender = {}
     if "message_row_id" in chat_df.columns:
@@ -228,7 +230,6 @@ def generate_chat_html(
 
     last_sender = None
 
-    # State for collapsing replied-to messages
     collapse_buffer = []
     collapse_group_id = 0
 
@@ -244,16 +245,14 @@ def generate_chat_html(
 
         total = len(collapse_buffer)
 
-        # Add the toggle button
         group_html.append(
-            f'<div class="wa-collapse-block" id="collapse-btn-{collapse_group_id}" onclick="expandCollapseGroup({collapse_group_id}, {total})">'
+            f'<div class="wa-collapse-block" id="collapse-btn-{collapse_group_id}" onclick="expandCollapseGroup({collapse_group_id}, {total})" style="display: flex; align-items: center; justify-content: center; gap: 6px;">'
         )
         group_html.append(
-            f"🔄 {total} replied-to messages collapsed. Click to expand 5."
+            f'<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg> <span>{total} replied-to messages collapsed. Click to expand 5.</span>'
         )
         group_html.append("</div>")
 
-        # Add the messages hidden by default
         for i, msg_html in enumerate(collapse_buffer):
             group_html.append(
                 f'<div class="wa-hidden collapse-item-{collapse_group_id}" data-index="{i}">{msg_html}</div>'
@@ -311,7 +310,6 @@ def generate_chat_html(
             rep_sender = "You" if id_to_sender.get(reply_to_id, False) else "Them"
             safe_text = str(rep_text) if pd.notna(rep_text) else "<Media>"
 
-            # Map the replied-to ID to its target idx for smooth scrolling
             target_idx = row_id_to_idx.get(reply_to_id, -1)
             scroll_onclick = (
                 f"scrollToMsg('msg-{target_idx}')" if target_idx != -1 else ""
@@ -324,7 +322,6 @@ def generate_chat_html(
             </div>
             """)
 
-        # Message text
         msg_html_parts.append(
             f"<span>{html.escape(text).replace(chr(10), '<br>')}</span>"
         )
@@ -334,7 +331,6 @@ def generate_chat_html(
 
         msg_html = "\n".join(msg_html_parts)
 
-        # Collapse Logic
         if collapse_replies and idx in reply_target_indices:
             collapse_buffer.append(msg_html)
         else:
@@ -344,11 +340,9 @@ def generate_chat_html(
 
         last_sender = is_me
 
-    # Flush remaining collapsed messages
     if collapse_buffer:
         html_parts.append(render_collapsed_buffer())
 
-    # JS Logic
     script = """
     <script>
         var container = document.getElementById("wa-chat-container");
