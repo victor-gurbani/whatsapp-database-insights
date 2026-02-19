@@ -355,25 +355,74 @@ def generate_chat_html(
             cont.scrollTo({ top: cont.scrollHeight, behavior: 'smooth' });
         }
         
-        function scrollToLastUnreplied() {
-            var items = document.getElementsByClassName("highlight-unreplied-context");
-            if (items.length > 0) {
-                var lastItem = items[items.length - 1];
-                lastItem.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                // Add a brief flash effect
-                var oldBg = lastItem.style.backgroundColor;
-                lastItem.style.backgroundColor = '#f8bbd0';
-                setTimeout(() => { lastItem.style.backgroundColor = oldBg; }, 1500);
+        let unrepliedTargets = [];
+        let currentTargetIdx = -1;
+
+        function buildUnrepliedTargets() {
+            let messages = document.querySelectorAll('.wa-message');
+            unrepliedTargets = [];
+            let inUnrepliedBlock = false;
+            let lastUnrepliedMsg = null;
+
+            for (let i = 0; i < messages.length; i++) {
+                let msg = messages[i];
+                let isHighlighted = msg.classList.contains('highlight-reply-target') ||
+                                    msg.classList.contains('highlight-adv-context') ||
+                                    msg.classList.contains('highlight-unreplied-context');
+
+                if (!isHighlighted) {
+                    lastUnrepliedMsg = msg;
+                    inUnrepliedBlock = true;
+                } else {
+                    if (inUnrepliedBlock && lastUnrepliedMsg) {
+                        unrepliedTargets.push(lastUnrepliedMsg);
+                        inUnrepliedBlock = false;
+                    }
+                }
             }
+            if (inUnrepliedBlock && lastUnrepliedMsg) {
+                unrepliedTargets.push(lastUnrepliedMsg);
+            }
+            currentTargetIdx = unrepliedTargets.length - 1;
+        }
+
+        function scrollToPrevUnrepliedBlock() {
+            if (unrepliedTargets.length === 0) {
+                buildUnrepliedTargets();
+            }
+            if (unrepliedTargets.length === 0) {
+                return;
+            }
+
+            if (currentTargetIdx < 0) {
+                currentTargetIdx = unrepliedTargets.length - 1;
+            }
+
+            let target = unrepliedTargets[currentTargetIdx];
+
+            var hiddenWrap = target.closest('.wa-hidden');
+            if (hiddenWrap) {
+                var classList = hiddenWrap.className.split(' ');
+                var groupClass = classList.find(c => c.startsWith('collapse-item-'));
+                if (groupClass) {
+                    var groupId = groupClass.split('-')[2];
+                    expandCollapseGroupAll(groupId);
+                }
+            }
+
+            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            var oldBg = target.style.backgroundColor;
+            target.style.backgroundColor = '#f8bbd0';
+            setTimeout(() => { target.style.backgroundColor = oldBg; }, 1500);
+
+            currentTargetIdx--;
         }
         
         function scrollToMsg(msgId) {
             var msg = document.getElementById(msgId);
             if (msg) {
-                // If it's inside a collapsed group, we must expand it first.
                 var hiddenWrap = msg.closest('.wa-hidden');
                 if (hiddenWrap) {
-                    // Extract group ID from class like 'collapse-item-2'
                     var classList = hiddenWrap.className.split(' ');
                     var groupClass = classList.find(c => c.startsWith('collapse-item-'));
                     if (groupClass) {
@@ -389,7 +438,6 @@ def generate_chat_html(
             }
         }
         
-        // Track how many are shown per group
         var groupShownCount = {};
         
         function expandCollapseGroup(groupId, totalCount) {
@@ -411,10 +459,10 @@ def generate_chat_html(
             var btn = document.getElementById('collapse-btn-' + groupId);
             
             if (toShow >= totalCount) {
-                btn.style.display = 'none'; // fully expanded
+                btn.style.display = 'none';
             } else {
                 var remaining = totalCount - toShow;
-                btn.innerHTML = '🔄 ' + remaining + ' more hidden. Click to expand 5.';
+                btn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg> <span>' + remaining + ' more hidden. Click to expand 5.</span>';
             }
         }
         
