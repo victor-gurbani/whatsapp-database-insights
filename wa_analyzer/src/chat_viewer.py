@@ -486,6 +486,37 @@ def generate_chat_html(
     return "\n".join(html_parts)
 
 
+def export_chat_html_standalone(chat_df, **kwargs):
+    raw_html = generate_chat_html(chat_df, **kwargs)
+
+    raw_html = raw_html.replace(
+        "height: 600px;",
+        "height: 100vh; width: 100vw; box-sizing: border-box; border-radius: 0; margin: 0;",
+    )
+
+    full_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp Chat Export</title>
+    <style>
+        body {{
+            margin: 0;
+            padding: 0;
+            background-color: #e5ddd5;
+            overflow: hidden;
+        }}
+    </style>
+</head>
+<body>
+    {raw_html}
+</body>
+</html>
+"""
+    return full_html
+
+
 def export_chat_json(chat_df):
     export_df = chat_df.copy()
     if "timestamp" in export_df.columns:
