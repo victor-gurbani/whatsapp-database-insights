@@ -3820,6 +3820,14 @@ if "data" in st.session_state:
                         value=False,
                         help="Swaps the left/right and color orientation of the messages. Useful if you want to view the conversation from the other person's perspective.",
                     )
+                    if flip_sides:
+                        my_name = st.text_input(
+                            "My Name (for flipped view)",
+                            value="Me",
+                            help="Name to display for your messages when viewed from the other person's perspective.",
+                        )
+                    else:
+                        my_name = "Me"
                 with col_t2:
                     adv_replies = st.toggle(
                         "Advanced Replies View",
@@ -3867,6 +3875,29 @@ if "data" in st.session_state:
                         value=True,
                         help="Significantly speeds up the browser by only rendering messages currently visible on screen. Recommended for large chats.",
                     )
+                    if enable_virtualization:
+                        col_v1, col_v2 = st.columns(2)
+                        with col_v1:
+                            virt_initial = st.number_input(
+                                "Initial Messages (Chunk)",
+                                min_value=50,
+                                max_value=2000,
+                                value=300,
+                                step=50,
+                                help="How many messages to load instantly.",
+                            )
+                        with col_v2:
+                            virt_chunk = st.number_input(
+                                "Scroll Load (Chunk)",
+                                min_value=50,
+                                max_value=500,
+                                value=120,
+                                step=10,
+                                help="How many messages to load when scrolling up.",
+                            )
+                    else:
+                        virt_initial = 300
+                        virt_chunk = 120
                 with col_p2:
                     max_messages_limit = st.number_input(
                         "Max Messages to Load",
@@ -3906,7 +3937,9 @@ if "data" in st.session_state:
                         mime="application/json",
                     )
                 with col_dl2:
-                    txt_data = export_chat_txt(chat_df, flip_sides=flip_sides)
+                    txt_data = export_chat_txt(
+                        chat_df, flip_sides=flip_sides, my_name=my_name
+                    )
                     st.download_button(
                         label="Download as TXT",
                         data=txt_data,
@@ -3923,6 +3956,9 @@ if "data" in st.session_state:
                         context_view=context_view,
                         collapse_replies=collapse_replies,
                         virtualization=enable_virtualization,
+                        virt_initial=virt_initial,
+                        virt_chunk=virt_chunk,
+                        my_name=my_name,
                     )
                     st.download_button(
                         label="Download as Standalone HTML",
@@ -3943,6 +3979,9 @@ if "data" in st.session_state:
                     context_view=context_view,
                     collapse_replies=collapse_replies,
                     virtualization=enable_virtualization,
+                    virt_initial=virt_initial,
+                    virt_chunk=virt_chunk,
+                    my_name=my_name,
                 )
 
                 st.components.v1.html(html_output, height=620, scrolling=False)

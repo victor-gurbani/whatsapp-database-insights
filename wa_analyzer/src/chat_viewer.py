@@ -12,6 +12,9 @@ def generate_chat_html(
     context_view=False,
     collapse_replies=False,
     virtualization=True,
+    virt_initial=300,
+    virt_chunk=120,
+    my_name="Me",
 ):
     if chat_df.empty:
         return "<p>No messages in this chat.</p>"
@@ -76,10 +79,12 @@ def generate_chat_html(
 
     id_to_text = {}
     id_to_sender = {}
+    id_to_from_me = {}
     if "message_row_id" in chat_df.columns:
         for _, row in chat_df.iterrows():
             id_to_text[row["message_row_id"]] = row["text_data"]
             id_to_sender[row["message_row_id"]] = row["is_me"]
+            id_to_from_me[row["message_row_id"]] = row["from_me"]
 
     last_sender = None
     for idx, row in chat_df.iterrows():
@@ -109,11 +114,14 @@ def generate_chat_html(
 
         sender_name = ""
         if not is_me and last_sender != is_me:
-            sender_name = "Them"
-            if "contact_name" in row and pd.notna(row["contact_name"]):
-                sender_name = str(row["contact_name"])
-            elif "raw_string" in row and pd.notna(row["raw_string"]):
-                sender_name = str(row["raw_string"])
+            if flip_sides and row.get("from_me") == 1:
+                sender_name = str(my_name)
+            else:
+                sender_name = "Them"
+                if "contact_name" in row and pd.notna(row["contact_name"]):
+                    sender_name = str(row["contact_name"])
+                elif "raw_string" in row and pd.notna(row["raw_string"]):
+                    sender_name = str(row["raw_string"])
 
         reply_to_id = row.get("reply_to_row_id")
         rep_text = ""
@@ -125,7 +133,14 @@ def generate_chat_html(
                 if pd.notna(id_to_text[reply_to_id])
                 else "<Media>"
             )
-            rep_sender = "You" if id_to_sender.get(reply_to_id, False) else "Them"
+            rep_is_me = id_to_sender.get(reply_to_id, False)
+            if rep_is_me:
+                rep_sender = "You"
+            else:
+                if flip_sides and id_to_from_me.get(reply_to_id) == 1:
+                    rep_sender = str(my_name)
+                else:
+                    rep_sender = "Them"
             rep_target_idx = row_id_to_idx.get(reply_to_id, -1)
 
         should_collapse = collapse_replies and (
@@ -203,8 +218,8 @@ def generate_chat_html(
     <script>
         const CHAT_DATA = __CHAT_DATA_JSON__;
         const VIRTUALIZATION_ENABLED = __VIRT_FLAG__;
-        const CHUNK_SIZE = 120;
-        const INITIAL_CHUNK_SIZE = 300;
+        const CHUNK_SIZE = __VIRT_CHUNK__;
+        const INITIAL_CHUNK_SIZE = __VIRT_INITIAL__;
         
         let renderedStartIndex = 0;
         let renderedEndIndex = 0;
@@ -512,6 +527,8 @@ def generate_chat_html(
 
     script = script.replace("__CHAT_DATA_JSON__", chat_json_str)
     script = script.replace("__VIRT_FLAG__", virt_str)
+    script = script.replace("__VIRT_INITIAL__", str(virt_initial))
+    script = script.replace("__VIRT_CHUNK__", str(virt_chunk))
 
     html_parts.append(script)
 
@@ -551,7 +568,7 @@ def export_chat_json(chat_df):
     return export_df.to_json(orient="records", date_format="iso")
 
 
-def export_chat_txt(chat_df, flip_sides=False):
+def export_chat_txt(chat_df, flip_sides=False, my_name="Me"):
     lines = []
 
     id_to_text = {}
@@ -564,7 +581,13 @@ def export_chat_txt(chat_df, flip_sides=False):
         if flip_sides:
             is_me = not is_me
 
-        sender = "Me" if is_me else str(row.get("contact_name", "Them"))
+        if is_me:
+            sender = "Me"
+        else:
+            if flip_sides and row.get("from_me") == 1:
+                sender = str(my_name)
+            else:
+                sender = str(row.get("contact_name", "Them"))
         time_str = ""
         if pd.notna(row["timestamp"]):
             try:
