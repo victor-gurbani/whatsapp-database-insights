@@ -12,6 +12,11 @@ import tempfile
 import hashlib
 from wa_analyzer.src.parser import WhatsappParser
 from wa_analyzer.src.analyzer import WhatsappAnalyzer
+from wa_analyzer.src.chat_viewer import (
+    generate_chat_html,
+    export_chat_json,
+    export_chat_txt,
+)
 from wordcloud import WordCloud
 
 # Page Config
@@ -1130,7 +1135,7 @@ if "data" in st.session_state:
     col4.metric("Unique Contacts", av(unique_contacts_raw, _anon_numbers))
 
     # --- Tabs ---
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(
         [
             "📊 Activity & Top Users",
             "🔥 Behavioral Patterns",
@@ -1140,6 +1145,7 @@ if "data" in st.session_state:
             "👥 Group Explorer",
             "🎪 Fun & Insights",
             "🗺️ Map",
+            "📱 Chat Viewer",
         ]
     )
 
@@ -3793,6 +3799,117 @@ if "data" in st.session_state:
             st.dataframe(loc_data[["contact_name", "timestamp", "place_name"]])
         else:
             st.info("No location data found in this backup.")
+
+    with tab9:
+        st.header("📱 WhatsApp Chat Viewer")
+        st.write("Preview your chats exactly as they look in WhatsApp.")
+
+        if "data" in st.session_state and not df_raw.empty:
+            contacts_list = sorted(df_raw["chat_name"].dropna().unique().astype(str))
+
+            selected_preview_chat = st.selectbox(
+                "Select Chat to Preview", contacts_list, key="chat_viewer_select"
+            )
+
+            if selected_preview_chat:
+                col_t1, col_t2, col_t3 = st.columns(3)
+                with col_t1:
+                    flip_sides = st.toggle(
+                        "Flip Sides (I am them, they are me)",
+                        value=False,
+                        help="Swaps the left/right and color orientation of the messages. Useful if you want to view the conversation from the other person's perspective.",
+                    )
+                with col_t2:
+                    adv_replies = st.toggle(
+                        "Advanced Replies View",
+                        value=False,
+                        help="Highlights any message that received a reply (in Orange) and marks the messages directly above/below it (in Blue) for extra context.",
+                    )
+                    if adv_replies:
+                        col_num1, col_num2 = st.columns(2)
+                        with col_num1:
+                            adv_msgs_above = st.number_input(
+                                "Messages above",
+                                min_value=0,
+                                max_value=10,
+                                value=2,
+                                help="Number of messages preceding the replied message to highlight.",
+                            )
+                        with col_num2:
+                            adv_msgs_below = st.number_input(
+                                "Messages below",
+                                min_value=0,
+                                max_value=10,
+                                value=1,
+                                help="Number of messages following the replied message to highlight.",
+                            )
+                    else:
+                        adv_msgs_above = 2
+                        adv_msgs_below = 1
+                with col_t3:
+                    context_view = st.toggle(
+                        "Context/Unreplied View",
+                        value=False,
+                        help="Highlights consecutive messages (in Pink) that were left 'unreplied' before the other person changed the topic or responded without explicitly quoting.",
+                    )
+                    collapse_replies = st.toggle(
+                        "Collapse Replied-To Messages",
+                        value=False,
+                        help="Groups consecutive messages that were explicitly replied to. You can click to expand them in chunks of 5.",
+                    )
+
+                st.markdown(
+                    """
+                    <div style="font-size:0.85rem; padding: 10px; background-color: rgba(255,255,255,0.05); border-radius: 5px; margin-bottom: 10px;">
+                        <b>🎨 Color Legend:</b> 
+                        <span style="display:inline-block; margin-right: 15px;">🟩 <b>Green</b>: Me</span>
+                        <span style="display:inline-block; margin-right: 15px;">⬜ <b>White</b>: Them</span>
+                        <span style="display:inline-block; margin-right: 15px;">🟧 <b>Orange Highlight</b>: Message that received a reply</span>
+                        <span style="display:inline-block; margin-right: 15px;">🟦 <b>Blue Dashed</b>: Context around a replied message</span>
+                        <span style="display:inline-block;">🟪 <b>Pink Highlight</b>: Unreplied context</span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                chat_df = df_raw[df_raw["chat_name"] == selected_preview_chat].copy()
+                chat_df = chat_df.sort_values("timestamp").reset_index(drop=True)
+
+                st.subheader("📥 Export Chat")
+                col_dl1, col_dl2 = st.columns([1, 1])
+                with col_dl1:
+                    json_data = export_chat_json(chat_df)
+                    st.download_button(
+                        label="Download as JSON",
+                        data=json_data,
+                        file_name=f"{selected_preview_chat}_export.json",
+                        mime="application/json",
+                    )
+                with col_dl2:
+                    txt_data = export_chat_txt(chat_df, flip_sides=flip_sides)
+                    st.download_button(
+                        label="Download as TXT",
+                        data=txt_data,
+                        file_name=f"{selected_preview_chat}_export.txt",
+                        mime="text/plain",
+                    )
+
+                st.divider()
+                st.subheader("💬 Chat Preview")
+
+                html_output = generate_chat_html(
+                    chat_df=chat_df,
+                    flip_sides=flip_sides,
+                    adv_replies=adv_replies,
+                    msgs_above=adv_msgs_above,
+                    msgs_below=adv_msgs_below,
+                    context_view=context_view,
+                    collapse_replies=collapse_replies,
+                )
+
+                st.components.v1.html(html_output, height=620, scrolling=False)
+        else:
+            st.info("Load data to preview chats.")
 
 else:
     st.info("👈 Please enter file paths.")
