@@ -2,6 +2,7 @@ import pandas as pd
 import html
 import json
 
+
 def generate_chat_html(
     chat_df,
     flip_sides=False,
@@ -72,7 +73,7 @@ def generate_chat_html(
 
     # 3. Serialize data to JSON for the frontend
     messages_data = []
-    
+
     id_to_text = {}
     id_to_sender = {}
     if "message_row_id" in chat_df.columns:
@@ -84,8 +85,12 @@ def generate_chat_html(
     for idx, row in chat_df.iterrows():
         is_me = bool(row["is_me"])
         text = str(row["text_data"]) if pd.notna(row["text_data"]) else ""
-        mime_type = str(row["mime_type"]) if "mime_type" in row and pd.notna(row["mime_type"]) else ""
-        
+        mime_type = (
+            str(row["mime_type"])
+            if "mime_type" in row and pd.notna(row["mime_type"])
+            else ""
+        )
+
         if pd.notna(row.get("timestamp")):
             try:
                 time_str = row["timestamp"].strftime("%H:%M")
@@ -115,38 +120,46 @@ def generate_chat_html(
         rep_sender = ""
         rep_target_idx = -1
         if pd.notna(reply_to_id) and reply_to_id in id_to_text:
-            rep_text = str(id_to_text[reply_to_id]) if pd.notna(id_to_text[reply_to_id]) else "<Media>"
+            rep_text = (
+                str(id_to_text[reply_to_id])
+                if pd.notna(id_to_text[reply_to_id])
+                else "<Media>"
+            )
             rep_sender = "You" if id_to_sender.get(reply_to_id, False) else "Them"
             rep_target_idx = row_id_to_idx.get(reply_to_id, -1)
 
-        should_collapse = collapse_replies and (idx in reply_target_indices or idx in highlight_indices)
+        should_collapse = collapse_replies and (
+            idx in reply_target_indices or idx in highlight_indices
+        )
 
-        messages_data.append({
-            "idx": idx,
-            "is_me": is_me,
-            "text": text,
-            "mime_type": mime_type,
-            "time_str": time_str,
-            "highlight_class": highlight_class,
-            "sender_name": sender_name,
-            "rep_text": rep_text,
-            "rep_sender": rep_sender,
-            "rep_target_idx": rep_target_idx,
-            "should_collapse": bool(should_collapse)
-        })
+        messages_data.append(
+            {
+                "idx": idx,
+                "is_me": is_me,
+                "text": text,
+                "mime_type": mime_type,
+                "time_str": time_str,
+                "highlight_class": highlight_class,
+                "sender_name": sender_name,
+                "rep_text": rep_text,
+                "rep_sender": rep_sender,
+                "rep_target_idx": rep_target_idx,
+                "should_collapse": bool(should_collapse),
+            }
+        )
 
         last_sender = is_me
 
     chat_json_str = json.dumps(messages_data)
-    virt_str = 'true' if virtualization else 'false'
+    virt_str = "true" if virtualization else "false"
 
     # 4. HTML + CSS + JS Template
     css = """
     <style>
-        .wa-wrapper-top { display: flex; flex-direction: column; gap: 10px; }
-        .wa-search-bar { padding: 10px; font-size: 14px; border: 1px solid #ccc; border-radius: 8px; width: 100%; box-sizing: border-box; box-shadow: 0 1px 3px rgba(0,0,0,0.1); outline: none; }
+        .wa-wrapper-top { display: flex; flex-direction: column; gap: 10px; height: 600px; overflow: hidden; }
+        .wa-search-bar { flex-shrink: 0; padding: 10px; font-size: 14px; border: 1px solid #ccc; border-radius: 8px; width: 100%; box-sizing: border-box; box-shadow: 0 1px 3px rgba(0,0,0,0.1); outline: none; }
         .wa-search-bar:focus { border-color: #35cd96; }
-        .wa-container { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #e5ddd5; background-image: url("https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png"); padding: 20px; display: flex; flex-direction: column; gap: 12px; height: 600px; overflow-y: auto; border-radius: 8px; scroll-behavior: smooth; position: relative; }
+        .wa-container { flex: 1; min-height: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #e5ddd5; background-image: url("https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png"); padding: 20px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; border-radius: 8px; scroll-behavior: smooth; position: relative; }
         .wa-message-wrap { display: flex; flex-direction: column; width: 100%; }
         .wa-message { max-width: 65%; padding: 8px 12px; border-radius: 7.5px; position: relative; font-size: 14px; line-height: 19px; box-shadow: 0 1px 0.5px rgba(0,0,0,0.13); display: inline-block; word-wrap: break-word; transition: background-color 1.5s; }
         .wa-me { align-self: flex-end; background-color: #dcf8c6; border-top-right-radius: 0; }
@@ -175,7 +188,7 @@ def generate_chat_html(
     """
 
     html_parts = [
-        css, 
+        css,
         '<div class="wa-wrapper-top">',
         '<input type="text" id="wa-search-input" class="wa-search-bar" placeholder="🔍 Search in chat... (Press Enter to highlight)">',
         '<div class="wa-container" id="wa-chat-container">',
@@ -183,19 +196,21 @@ def generate_chat_html(
         '<div id="wa-render-anchor"></div>',
         '<button class="wa-floating-btn" id="btn-scroll-down" onclick="scrollToBottom()" title="Scroll to Bottom"><svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="19 12 12 19 5 12"></polyline></svg></button>',
         '<button class="wa-floating-btn" id="btn-scroll-unreplied" onclick="scrollToPrevUnrepliedBlock()" title="Go to Previous Unreplied Message"><svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg></button>',
-        '</div></div>'
+        "</div></div>",
     ]
 
     script = """
     <script>
         const CHAT_DATA = __CHAT_DATA_JSON__;
         const VIRTUALIZATION_ENABLED = __VIRT_FLAG__;
-        const CHUNK_SIZE = 80;
+        const CHUNK_SIZE = 120;
+        const INITIAL_CHUNK_SIZE = 300;
         
         let renderedStartIndex = 0;
         let renderedEndIndex = 0;
         let collapseBuffer = [];
         let collapseGroupId = 0;
+        let isLoading = false;
         
         const container = document.getElementById("wa-chat-container");
         const renderAnchor = document.getElementById("wa-render-anchor");
@@ -306,9 +321,15 @@ def generate_chat_html(
             wrapper.innerHTML = htmlBuffer.join("\\n");
             
             if (prepend) {
-                let oldHeight = container.scrollHeight;
+                let oldScrollHeight = container.scrollHeight;
+                let oldScrollTop = container.scrollTop;
+                
+                container.style.overflowAnchor = "none";
                 renderAnchor.insertBefore(wrapper, renderAnchor.firstChild);
-                container.scrollTop += (container.scrollHeight - oldHeight);
+                
+                let newScrollHeight = container.scrollHeight;
+                container.scrollTop = oldScrollTop + (newScrollHeight - oldScrollHeight);
+                container.style.overflowAnchor = "auto";
             } else {
                 renderAnchor.appendChild(wrapper);
             }
@@ -319,9 +340,18 @@ def generate_chat_html(
         }
 
         function loadMoreUpwards() {
-            if (renderedStartIndex <= 0) return;
-            let newStart = Math.max(0, renderedStartIndex - CHUNK_SIZE);
-            renderMessages(newStart, renderedStartIndex, true);
+            if (renderedStartIndex <= 0 || isLoading) return;
+            isLoading = true;
+            let btn = topSpacer.querySelector('.load-more-btn');
+            if (btn) btn.innerHTML = "Loading...";
+            
+            // tiny timeout to let UI update
+            setTimeout(() => {
+                let newStart = Math.max(0, renderedStartIndex - CHUNK_SIZE);
+                renderMessages(newStart, renderedStartIndex, true);
+                if (btn) btn.innerHTML = "Load older messages";
+                isLoading = false;
+            }, 10);
         }
 
         function initChat() {
@@ -332,7 +362,7 @@ def generate_chat_html(
             if (total === 0) return;
             
             if (VIRTUALIZATION_ENABLED && !currentSearchQuery) {
-                renderedStartIndex = Math.max(0, total - CHUNK_SIZE);
+                renderedStartIndex = Math.max(0, total - INITIAL_CHUNK_SIZE);
                 renderedEndIndex = renderedStartIndex;
                 renderMessages(renderedStartIndex, total, false);
                 container.scrollTop = container.scrollHeight;
@@ -341,6 +371,15 @@ def generate_chat_html(
                 renderedEndIndex = 0;
                 renderMessages(0, total, false);
                 container.scrollTop = container.scrollHeight;
+            }
+            
+            if (VIRTUALIZATION_ENABLED && !currentSearchQuery && window.IntersectionObserver) {
+                let observer = new IntersectionObserver((entries) => {
+                    if (entries[0].isIntersecting && renderedStartIndex > 0 && !isLoading) {
+                        loadMoreUpwards();
+                    }
+                }, { root: container, rootMargin: "150px 0px 0px 0px" });
+                observer.observe(topSpacer);
             }
         }
 
@@ -470,13 +509,14 @@ def generate_chat_html(
         initChat();
     </script>
     """
-    
+
     script = script.replace("__CHAT_DATA_JSON__", chat_json_str)
     script = script.replace("__VIRT_FLAG__", virt_str)
-    
+
     html_parts.append(script)
-    
+
     return "\n".join(html_parts)
+
 
 def export_chat_html_standalone(chat_df, **kwargs):
     raw_html = generate_chat_html(chat_df, **kwargs)
