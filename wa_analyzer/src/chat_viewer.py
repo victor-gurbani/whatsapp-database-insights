@@ -17,9 +17,27 @@ def generate_chat_html(
     virt_initial=300,
     virt_chunk=120,
     my_name="Me",
+    enable_tooltips=True,
+    enable_minimap=True,
+    enable_sentiment=False,
 ):
     if chat_df.empty:
         return "<p>No messages in this chat.</p>"
+
+
+    import re
+    pos_emojis = re.compile(r"[😂🤣❤️😍😊😁👍🙌🎉✨🔥]")
+    neg_emojis = re.compile(r"[😡🤬😠🖕👎💔😭😢🙄]")
+    pos_words = re.compile(r"\b(haha|lol|lmao|love|great|awesome|good|thanks|thank you)\b", re.IGNORECASE)
+    neg_words = re.compile(r"\b(fuck|shit|wtf|hate|bad|angry|sorry|sad)\b", re.IGNORECASE)
+
+    def get_sentiment(text):
+        if not isinstance(text, str): return 0
+        p = len(pos_emojis.findall(text)) + len(pos_words.findall(text))
+        n = len(neg_emojis.findall(text)) + len(neg_words.findall(text))
+        if p > n: return 1
+        if n > p: return -1
+        return 0
 
     # 1. Base Setup
     chat_df = chat_df.copy()
@@ -208,6 +226,12 @@ def generate_chat_html(
         .virtual-spacer { width: 100%; display: flex; justify-content: center; padding: 10px 0; }
         .load-more-btn { background-color: #e2f0fb; color: #4a86e8; border: none; padding: 8px 16px; border-radius: 16px; cursor: pointer; font-size: 13px; font-weight: bold; box-shadow: 0 1px 2px rgba(0,0,0,0.1); }
         .load-more-btn:hover { background-color: #c9e2f9; }
+        
+        .wa-main-flex { display: flex; flex: 1; overflow: hidden; position: relative; width: 100%; }
+        #wa-minimap-container { width: 50px; background-color: #d1c8c0; border-left: 1px solid #bbaea0; position: relative; flex-shrink: 0; display: none; }
+        #wa-minimap { width: 100%; height: 100%; display: block; cursor: pointer; }
+        #wa-minimap-viewport { position: absolute; top: 0; left: 0; width: 100%; background: rgba(0, 0, 0, 0.15); pointer-events: none; border-top: 1px solid #555; border-bottom: 1px solid #555; box-shadow: 0 0 5px rgba(0,0,0,0.2); }
+        .wa-msg-body { display: inline; }
     </style>
     """
 
@@ -215,12 +239,15 @@ def generate_chat_html(
         css,
         '<div class="wa-wrapper-top">',
         '<input type="text" id="wa-search-input" class="wa-search-bar" placeholder="🔍 Search in chat... (Press Enter to highlight)">',
+        '<div class="wa-main-flex">',
         '<div class="wa-container" id="wa-chat-container">',
         '<div id="wa-virtual-top-spacer" class="virtual-spacer" style="display:none;"><button class="load-more-btn" onclick="loadMoreUpwards()">Load older messages</button></div>',
         '<div id="wa-render-anchor"></div>',
         '<button class="wa-floating-btn" id="btn-scroll-down" onclick="scrollToBottom()" title="Scroll to Bottom"><svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="19 12 12 19 5 12"></polyline></svg></button>',
         '<button class="wa-floating-btn" id="btn-scroll-unreplied" onclick="scrollToPrevUnrepliedBlock()" title="Go to Previous Unreplied Message"><svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg></button>',
         '<button class="wa-floating-btn" id="btn-scroll-unreplied-q" onclick="scrollToPrevUnrepliedQuestion()" title="Go to Previous Unreplied Question"><svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg></button>',
+        "</div>",
+        '<div id="wa-minimap-container"><canvas id="wa-minimap"></canvas><div id="wa-minimap-viewport"></div></div>',
         "</div></div>",
     ]
 
@@ -232,6 +259,9 @@ def generate_chat_html(
         const INITIAL_CHUNK_SIZE = __VIRT_INITIAL__;
         const UNREPLIED_CHUNK_SIZE = __UNREPLIED_CHUNK_SIZE__;
         const UNREPLIED_OTHER_ONLY = __UNREPLIED_OTHER_ONLY__;
+        const ENABLE_TOOLTIPS = __ENABLE_TOOLTIPS__;
+        const ENABLE_MINIMAP = __ENABLE_MINIMAP__;
+        const ENABLE_SENTIMENT = __ENABLE_SENTIMENT__;
         
         let renderedStartIndex = 0;
         let renderedEndIndex = 0;
@@ -297,12 +327,14 @@ def generate_chat_html(
             }
             
             let contentHtml = "";
-            if (msg.text) contentHtml += `<span>${highlightText(msg.text, currentSearchQuery)}</span>`;
+            if (msg.text) contentHtml += `<span class="wa-msg-body">${highlightText(msg.text, currentSearchQuery)}</span>`;
             else if (msg.mime_type) contentHtml += getMediaHtml(msg.mime_type);
             else contentHtml += `<span>&lt;Media/Other&gt;</span>`;
             
             htmlParts.push(contentHtml);
-            htmlParts.push(`<span class="wa-time">${msg.time_str}</span>`);
+            
+            let timeHtml = ENABLE_TOOLTIPS && msg.full_time ? `<span class="wa-time" title="${msg.full_time}">${msg.time_str}</span>` : `<span class="wa-time">${msg.time_str}</span>`;
+            htmlParts.push(timeHtml);
             htmlParts.push('</div></div>');
             return htmlParts.join("\\n");
         }
@@ -394,6 +426,68 @@ def generate_chat_html(
             }, 150);
         }
 
+
+        function setupMinimap() {
+            if (!ENABLE_MINIMAP) return;
+            document.getElementById('wa-minimap-container').style.display = 'block';
+            let btns = document.querySelectorAll('.wa-floating-btn');
+            btns.forEach(b => b.style.right = '80px');
+            
+            const canvas = document.getElementById('wa-minimap');
+            const ctx = canvas.getContext('2d');
+            const rect = canvas.getBoundingClientRect();
+            // Match internal resolution to display size
+            canvas.width = rect.width;
+            canvas.height = rect.height || 600; 
+            
+            let totalWeight = 0;
+            CHAT_DATA.forEach(m => {
+                m._weight = Math.max(1, Math.min(10, Math.ceil((m.text || "").length / 40)));
+                totalWeight += m._weight;
+            });
+            
+            let currentY = 0;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            CHAT_DATA.forEach(m => {
+                let h = (m._weight / totalWeight) * canvas.height;
+                m._minimapY = currentY;
+                m._minimapH = h;
+                
+                if (ENABLE_SENTIMENT && m.sentiment !== 0) {
+                    ctx.fillStyle = m.sentiment > 0 ? '#ffeb3b' : '#f44336';
+                } else {
+                    ctx.fillStyle = m.is_me ? '#dcf8c6' : '#ffffff';
+                }
+                
+                let w = canvas.width / 2;
+                let x = m.is_me ? w : 0;
+                ctx.fillRect(x, currentY, w, Math.max(1, h));
+                currentY += h;
+            });
+            
+            canvas.addEventListener('click', function(e) {
+                const rect = canvas.getBoundingClientRect();
+                const y = e.clientY - rect.top;
+                let targetMsg = CHAT_DATA.find(m => y >= m._minimapY && y <= m._minimapY + m._minimapH);
+                if (targetMsg) {
+                    scrollToMsg('msg-' + targetMsg.idx);
+                }
+            });
+        }
+
+        function updateMinimapViewport() {
+            if (!ENABLE_MINIMAP) return;
+            const vp = document.getElementById('wa-minimap-viewport');
+            const ratioTop = container.scrollTop / container.scrollHeight;
+            const ratioHeight = container.clientHeight / container.scrollHeight;
+            vp.style.top = (ratioTop * 100) + '%';
+            vp.style.height = (ratioHeight * 100) + '%';
+        }
+        
+        container.addEventListener('scroll', updateMinimapViewport);
+        window.addEventListener('resize', setupMinimap);
+
         function initChat() {
             targetsBuilt = false;
             unrepliedTargets = [];
@@ -474,7 +568,8 @@ def generate_chat_html(
                     for (let j = 0; j < currentBlock.length; j++) {
                         let cMsg = currentBlock[j];
                         if (!UNREPLIED_OTHER_ONLY || !cMsg.classList.contains('wa-me')) {
-                            if (cMsg.textContent && cMsg.textContent.includes('?')) {
+                            let bodySpan = cMsg.querySelector('.wa-msg-body');
+                            if (bodySpan && bodySpan.textContent.includes('?')) {
                                 unrepliedQuestionTargets.push(cMsg);
                             }
                         }

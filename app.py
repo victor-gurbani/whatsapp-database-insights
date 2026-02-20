@@ -3885,6 +3885,15 @@ if "data" in st.session_state:
                     )
 
                 st.markdown("<br>", unsafe_allow_html=True)
+                col_f1, col_f2, col_f3 = st.columns(3)
+                with col_f1:
+                    enable_tooltips = st.toggle("Enable Tooltip Timestamps", value=True, help="Hover over a message to see the exact date and time.")
+                with col_f2:
+                    enable_minimap = st.toggle("Show Chat Minimap", value=True, help="Shows a VS Code style minimap of the chat history on the right.")
+                with col_f3:
+                    enable_sentiment = st.toggle("Minimap Sentiment", value=False, help="Highlights positive (yellow) and negative (red) messages in the minimap.")
+                
+                st.markdown("<br>", unsafe_allow_html=True)
                 col_p1, col_p2 = st.columns(2)
                 with col_p1:
                     enable_virtualization = st.toggle(
@@ -3978,6 +3987,9 @@ if "data" in st.session_state:
                         virt_initial=virt_initial,
                         virt_chunk=virt_chunk,
                         my_name=my_name,
+                        enable_tooltips=enable_tooltips,
+                        enable_minimap=enable_minimap,
+                        enable_sentiment=enable_sentiment,
                     )
                     st.download_button(
                         label="Download as Standalone HTML",
@@ -4003,6 +4015,9 @@ if "data" in st.session_state:
                     virt_initial=virt_initial,
                     virt_chunk=virt_chunk,
                     my_name=my_name,
+                    enable_tooltips=enable_tooltips,
+                    enable_minimap=enable_minimap,
+                    enable_sentiment=enable_sentiment,
                 )
 
                 st.components.v1.html(html_output, height=620, scrolling=False)
