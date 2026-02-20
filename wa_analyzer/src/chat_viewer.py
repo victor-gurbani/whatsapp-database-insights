@@ -28,8 +28,25 @@ def generate_chat_html(
     import re
     pos_emojis = re.compile(r"[😂🤣❤️😍😊😁👍🙌🎉✨🔥]")
     neg_emojis = re.compile(r"[😡🤬😠🖕👎💔😭😢🙄]")
-    pos_words = re.compile(r"\b(haha|lol|lmao|love|great|awesome|good|thanks|thank you)\b", re.IGNORECASE)
-    neg_words = re.compile(r"\b(fuck|shit|wtf|hate|bad|angry|sorry|sad)\b", re.IGNORECASE)
+    pos_words = re.compile(
+        r"\b(haha|jaja|jajaja|jeje|lol|lmao|mdr|ptdr|kkk|rsrs|"
+        r"love|great|awesome|good|thanks|thank you|amazing|perfect|yay|yey|"
+        r"gracias|genial|bien|bueno|perfecto|guay|chulo|excelente|vale|"
+        r"danke|gut|super|toll|perfekt|gerne|schön|klasse|mega|"
+        r"merci|bon|génial|géniale|parfait|"
+        r"grazie|bene|buono|ottimo|grande|"
+        r"obrigado|bom|ótimo|legal)\b",
+        re.IGNORECASE,
+    )
+    neg_words = re.compile(
+        r"\b(fuck|shit|wtf|hate|bad|angry|sorry|sad|awful|terrible|worst|"
+        r"joder|mierda|puto|puta|odio|malo|triste|perdón|perdon|horrible|fatal|hostia|ostia|"
+        r"scheiße|scheisse|fick|hasse|schlecht|böse|traurig|furchtbar|schlimm|mist|"
+        r"merde|putain|chier|con|connard|désolé|nul|mauvais|déteste|"
+        r"cazzo|scusa|male|brutto|cattivo|"
+        r"porra|caralho|foda|desculpa|ruim|péssimo|odeio)\b",
+        re.IGNORECASE,
+    )
 
     def get_sentiment(text):
         if not isinstance(text, str): return 0
@@ -706,6 +723,15 @@ def generate_chat_html(
     script = script.replace("__UNREPLIED_CHUNK_SIZE__", str(unreplied_chunk_size))
     script = script.replace(
         "__UNREPLIED_OTHER_ONLY__", "true" if unreplied_other_only else "false"
+    )
+    script = script.replace(
+        "__ENABLE_TOOLTIPS__", "true" if enable_tooltips else "false"
+    )
+    script = script.replace(
+        "__ENABLE_MINIMAP__", "true" if enable_minimap else "false"
+    )
+    script = script.replace(
+        "__ENABLE_SENTIMENT__", "true" if enable_sentiment else "false"
     )
 
     html_parts.append(script)
