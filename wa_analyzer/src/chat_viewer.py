@@ -10,6 +10,7 @@ def generate_chat_html(
     msgs_above=2,
     msgs_below=1,
     context_view=False,
+    unreplied_chunk_size=1,
     collapse_replies=False,
     virtualization=True,
     virt_initial=300,
@@ -45,13 +46,19 @@ def generate_chat_html(
                 replied_to = row["reply_to_row_id"]
                 if replied_to in row_id_to_idx:
                     target_idx = row_id_to_idx[replied_to]
-                    reply_target_indices.add(target_idx)
-                    for i in range(max(0, target_idx - msgs_above), target_idx):
-                        highlight_indices.add(i)
-                    for i in range(
-                        target_idx + 1, min(len(chat_df), target_idx + msgs_below + 1)
-                    ):
-                        highlight_indices.add(i)
+                    target_is_me = chat_df.iloc[target_idx]["is_me"]
+
+                    if not target_is_me:
+                        reply_target_indices.add(target_idx)
+                        for i in range(max(0, target_idx - msgs_above), target_idx):
+                            if not chat_df.iloc[i]["is_me"]:
+                                highlight_indices.add(i)
+                        for i in range(
+                            target_idx + 1,
+                            min(len(chat_df), target_idx + msgs_below + 1),
+                        ):
+                            if not chat_df.iloc[i]["is_me"]:
+                                highlight_indices.add(i)
 
     if context_view:
         for idx in range(1, len(chat_df)):
@@ -220,6 +227,7 @@ def generate_chat_html(
         const VIRTUALIZATION_ENABLED = __VIRT_FLAG__;
         const CHUNK_SIZE = __VIRT_CHUNK__;
         const INITIAL_CHUNK_SIZE = __VIRT_INITIAL__;
+        const UNREPLIED_CHUNK_SIZE = __UNREPLIED_CHUNK_SIZE__;
         
         let renderedStartIndex = 0;
         let renderedEndIndex = 0;
@@ -436,6 +444,7 @@ def generate_chat_html(
             unrepliedTargets = [];
             let inUnrepliedBlock = false;
             let lastUnrepliedMsg = null;
+            let currentBlockCount = 0;
 
             for (let i = 0; i < messages.length; i++) {
                 let msg = messages[i];
@@ -446,14 +455,18 @@ def generate_chat_html(
                 if (!isHighlighted) {
                     lastUnrepliedMsg = msg;
                     inUnrepliedBlock = true;
+                    currentBlockCount++;
                 } else {
-                    if (inUnrepliedBlock && lastUnrepliedMsg) {
+                    if (inUnrepliedBlock && lastUnrepliedMsg && currentBlockCount >= UNREPLIED_CHUNK_SIZE) {
                         unrepliedTargets.push(lastUnrepliedMsg);
-                        inUnrepliedBlock = false;
                     }
+                    inUnrepliedBlock = false;
+                    currentBlockCount = 0;
                 }
             }
-            if (inUnrepliedBlock && lastUnrepliedMsg) unrepliedTargets.push(lastUnrepliedMsg);
+            if (inUnrepliedBlock && lastUnrepliedMsg && currentBlockCount >= UNREPLIED_CHUNK_SIZE) {
+                unrepliedTargets.push(lastUnrepliedMsg);
+            }
             currentTargetIdx = unrepliedTargets.length - 1;
         }
 
@@ -542,6 +555,7 @@ def generate_chat_html(
     script = script.replace("__VIRT_FLAG__", virt_str)
     script = script.replace("__VIRT_INITIAL__", str(virt_initial))
     script = script.replace("__VIRT_CHUNK__", str(virt_chunk))
+    script = script.replace("__UNREPLIED_CHUNK_SIZE__", str(unreplied_chunk_size))
 
     html_parts.append(script)
 

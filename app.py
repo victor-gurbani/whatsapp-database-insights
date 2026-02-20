@@ -3861,6 +3861,17 @@ if "data" in st.session_state:
                         value=False,
                         help="Highlights consecutive messages (in Pink) that were implicitly replied to. This happens when someone responds directly without explicitly quoting.",
                     )
+                    if context_view:
+                        unreplied_chunk_size = st.number_input(
+                            "Unreplied Chunk Size",
+                            min_value=1,
+                            max_value=100,
+                            value=1,
+                            help="Search for chunks of X consecutive unreplied messages (Magnifying Glass button).",
+                        )
+                    else:
+                        unreplied_chunk_size = 1
+
                     collapse_replies = st.toggle(
                         "Collapse Replied-To Messages",
                         value=False,
@@ -3954,6 +3965,7 @@ if "data" in st.session_state:
                         msgs_above=adv_msgs_above,
                         msgs_below=adv_msgs_below,
                         context_view=context_view,
+                        unreplied_chunk_size=unreplied_chunk_size,
                         collapse_replies=collapse_replies,
                         virtualization=enable_virtualization,
                         virt_initial=virt_initial,
@@ -3977,6 +3989,7 @@ if "data" in st.session_state:
                     msgs_above=adv_msgs_above,
                     msgs_below=adv_msgs_below,
                     context_view=context_view,
+                    unreplied_chunk_size=unreplied_chunk_size,
                     collapse_replies=collapse_replies,
                     virtualization=enable_virtualization,
                     virt_initial=virt_initial,
