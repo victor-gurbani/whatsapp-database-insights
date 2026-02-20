@@ -3997,6 +3997,7 @@ if "data" in st.session_state:
                     msgs_below=adv_msgs_below,
                     context_view=context_view,
                     unreplied_chunk_size=unreplied_chunk_size,
+                    unreplied_other_only=unreplied_other_only,
                     collapse_replies=collapse_replies,
                     virtualization=enable_virtualization,
                     virt_initial=virt_initial,

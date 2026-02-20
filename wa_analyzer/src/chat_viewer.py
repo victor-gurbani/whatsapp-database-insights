@@ -395,6 +395,9 @@ def generate_chat_html(
         }
 
         function initChat() {
+            targetsBuilt = false;
+            unrepliedTargets = [];
+            unrepliedQuestionTargets = [];
             renderAnchor.innerHTML = "";
             collapseBuffer = [];
             collapseGroupId = 0;
@@ -442,70 +445,65 @@ def generate_chat_html(
         
         let unrepliedTargets = [];
         let currentTargetIdx = -1;
+        let unrepliedQuestionTargets = [];
+        let currentQuestionTargetIdx = -1;
+        let targetsBuilt = false;
 
-        function buildUnrepliedTargets() {
+        function buildAllUnrepliedTargets() {
             let messages = document.querySelectorAll('.wa-message');
             unrepliedTargets = [];
-            let inUnrepliedBlock = false;
-            let lastUnrepliedMsg = null;
-            let currentBlockCount = 0;
+            unrepliedQuestionTargets = [];
+            let currentBlock = [];
+
+            function processBlock() {
+                if (currentBlock.length >= UNREPLIED_CHUNK_SIZE) {
+                    // Normal Target: Last message in block matching criteria
+                    let target = null;
+                    for (let j = currentBlock.length - 1; j >= 0; j--) {
+                        let cMsg = currentBlock[j];
+                        if (!UNREPLIED_OTHER_ONLY || !cMsg.classList.contains('wa-me')) {
+                            target = cMsg;
+                            break;
+                        }
+                    }
+                    if (target) {
+                        unrepliedTargets.push(target);
+                    }
+
+                    // Question Targets: All messages in block matching criteria that have '?'
+                    for (let j = 0; j < currentBlock.length; j++) {
+                        let cMsg = currentBlock[j];
+                        if (!UNREPLIED_OTHER_ONLY || !cMsg.classList.contains('wa-me')) {
+                            if (cMsg.textContent && cMsg.textContent.includes('?')) {
+                                unrepliedQuestionTargets.push(cMsg);
+                            }
+                        }
+                    }
+                }
+                currentBlock = [];
+            }
 
             for (let i = 0; i < messages.length; i++) {
                 let msg = messages[i];
-                
-                if (UNREPLIED_OTHER_ONLY && msg.classList.contains('wa-me')) {
-                    continue;
-                }
-                
                 let isHighlighted = msg.classList.contains('highlight-reply-target') ||
                                     msg.classList.contains('highlight-adv-context') ||
                                     msg.classList.contains('highlight-unreplied-context');
 
                 if (!isHighlighted) {
-                    lastUnrepliedMsg = msg;
-                    inUnrepliedBlock = true;
-                    currentBlockCount++;
+                    currentBlock.push(msg);
                 } else {
-                    if (inUnrepliedBlock && lastUnrepliedMsg && currentBlockCount >= UNREPLIED_CHUNK_SIZE) {
-                        unrepliedTargets.push(lastUnrepliedMsg);
-                    }
-                    inUnrepliedBlock = false;
-                    currentBlockCount = 0;
+                    processBlock();
                 }
             }
-            if (inUnrepliedBlock && lastUnrepliedMsg && currentBlockCount >= UNREPLIED_CHUNK_SIZE) {
-                unrepliedTargets.push(lastUnrepliedMsg);
-            }
+            processBlock();
+
             currentTargetIdx = unrepliedTargets.length - 1;
-        }
-
-        let unrepliedQuestionTargets = [];
-        let currentQuestionTargetIdx = -1;
-
-        function buildUnrepliedQuestionTargets() {
-            let messages = document.querySelectorAll('.wa-message');
-            unrepliedQuestionTargets = [];
-
-            for (let i = 0; i < messages.length; i++) {
-                let msg = messages[i];
-                
-                if (UNREPLIED_OTHER_ONLY && msg.classList.contains('wa-me')) {
-                    continue;
-                }
-                
-                let isHighlighted = msg.classList.contains('highlight-reply-target') ||
-                                    msg.classList.contains('highlight-adv-context') ||
-                                    msg.classList.contains('highlight-unreplied-context');
-
-                if (!isHighlighted && msg.innerText.includes('?')) {
-                    unrepliedQuestionTargets.push(msg);
-                }
-            }
             currentQuestionTargetIdx = unrepliedQuestionTargets.length - 1;
+            targetsBuilt = true;
         }
 
         function scrollToPrevUnrepliedQuestion() {
-            if (unrepliedQuestionTargets.length === 0) buildUnrepliedQuestionTargets();
+            if (!targetsBuilt) buildAllUnrepliedTargets();
             if (unrepliedQuestionTargets.length === 0) return;
 
             if (currentQuestionTargetIdx < 0) currentQuestionTargetIdx = unrepliedQuestionTargets.length - 1;
@@ -526,7 +524,7 @@ def generate_chat_html(
         }
 
         function scrollToPrevUnrepliedBlock() {
-            if (unrepliedTargets.length === 0) buildUnrepliedTargets();
+            if (!targetsBuilt) buildAllUnrepliedTargets();
             if (unrepliedTargets.length === 0) return;
 
             if (currentTargetIdx < 0) currentTargetIdx = unrepliedTargets.length - 1;
