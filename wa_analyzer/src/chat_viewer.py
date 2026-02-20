@@ -84,16 +84,16 @@ def generate_chat_html(
                     target_idx = row_id_to_idx[replied_to]
                     target_is_me = chat_df.iloc[target_idx]["is_me"]
 
-                    if not target_is_me:
+                    if row["is_me"] != target_is_me:
                         reply_target_indices.add(target_idx)
                         for i in range(max(0, target_idx - msgs_above), target_idx):
-                            if not chat_df.iloc[i]["is_me"]:
+                            if chat_df.iloc[i]["is_me"] == target_is_me:
                                 highlight_indices.add(i)
                         for i in range(
                             target_idx + 1,
                             min(len(chat_df), target_idx + msgs_below + 1),
                         ):
-                            if not chat_df.iloc[i]["is_me"]:
+                            if chat_df.iloc[i]["is_me"] == target_is_me:
                                 highlight_indices.add(i)
 
     if context_view:
@@ -534,6 +534,13 @@ def generate_chat_html(
                     }
                 }, { root: container, rootMargin: "150px 0px 0px 0px" });
                 observer.observe(topSpacer);
+            }
+            
+            if (ENABLE_MINIMAP) {
+                setTimeout(() => {
+                    setupMinimap();
+                    updateMinimapViewport();
+                }, 100);
             }
         }
 
