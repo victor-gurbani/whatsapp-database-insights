@@ -11,6 +11,7 @@ def generate_chat_html(
     msgs_below=1,
     context_view=False,
     unreplied_chunk_size=1,
+    unreplied_other_only=False,
     collapse_replies=False,
     virtualization=True,
     virt_initial=300,
@@ -199,6 +200,7 @@ def generate_chat_html(
         .wa-floating-btn:hover { background-color: #f0f0f0; }
         #btn-scroll-down { bottom: 40px; }
         #btn-scroll-unreplied { bottom: 90px; }
+        #btn-scroll-unreplied-q { bottom: 140px; }
         .wa-collapse-block { align-self: center; background-color: #e2f0fb; color: #4a86e8; padding: 6px 12px; border-radius: 12px; font-size: 12px; font-weight: bold; cursor: pointer; box-shadow: 0 1px 2px rgba(0,0,0,0.1); margin: 5px 0; user-select: none; }
         .wa-collapse-block:hover { background-color: #c9e2f9; }
         .wa-hidden { display: none !important; }
@@ -218,6 +220,7 @@ def generate_chat_html(
         '<div id="wa-render-anchor"></div>',
         '<button class="wa-floating-btn" id="btn-scroll-down" onclick="scrollToBottom()" title="Scroll to Bottom"><svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="19 12 12 19 5 12"></polyline></svg></button>',
         '<button class="wa-floating-btn" id="btn-scroll-unreplied" onclick="scrollToPrevUnrepliedBlock()" title="Go to Previous Unreplied Message"><svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg></button>',
+        '<button class="wa-floating-btn" id="btn-scroll-unreplied-q" onclick="scrollToPrevUnrepliedQuestion()" title="Go to Previous Unreplied Question"><svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg></button>',
         "</div></div>",
     ]
 
@@ -228,6 +231,7 @@ def generate_chat_html(
         const CHUNK_SIZE = __VIRT_CHUNK__;
         const INITIAL_CHUNK_SIZE = __VIRT_INITIAL__;
         const UNREPLIED_CHUNK_SIZE = __UNREPLIED_CHUNK_SIZE__;
+        const UNREPLIED_OTHER_ONLY = __UNREPLIED_OTHER_ONLY__;
         
         let renderedStartIndex = 0;
         let renderedEndIndex = 0;
@@ -448,6 +452,11 @@ def generate_chat_html(
 
             for (let i = 0; i < messages.length; i++) {
                 let msg = messages[i];
+                
+                if (UNREPLIED_OTHER_ONLY && msg.classList.contains('wa-me')) {
+                    continue;
+                }
+                
                 let isHighlighted = msg.classList.contains('highlight-reply-target') ||
                                     msg.classList.contains('highlight-adv-context') ||
                                     msg.classList.contains('highlight-unreplied-context');
@@ -468,6 +477,52 @@ def generate_chat_html(
                 unrepliedTargets.push(lastUnrepliedMsg);
             }
             currentTargetIdx = unrepliedTargets.length - 1;
+        }
+
+        let unrepliedQuestionTargets = [];
+        let currentQuestionTargetIdx = -1;
+
+        function buildUnrepliedQuestionTargets() {
+            let messages = document.querySelectorAll('.wa-message');
+            unrepliedQuestionTargets = [];
+
+            for (let i = 0; i < messages.length; i++) {
+                let msg = messages[i];
+                
+                if (UNREPLIED_OTHER_ONLY && msg.classList.contains('wa-me')) {
+                    continue;
+                }
+                
+                let isHighlighted = msg.classList.contains('highlight-reply-target') ||
+                                    msg.classList.contains('highlight-adv-context') ||
+                                    msg.classList.contains('highlight-unreplied-context');
+
+                if (!isHighlighted && msg.innerText.includes('?')) {
+                    unrepliedQuestionTargets.push(msg);
+                }
+            }
+            currentQuestionTargetIdx = unrepliedQuestionTargets.length - 1;
+        }
+
+        function scrollToPrevUnrepliedQuestion() {
+            if (unrepliedQuestionTargets.length === 0) buildUnrepliedQuestionTargets();
+            if (unrepliedQuestionTargets.length === 0) return;
+
+            if (currentQuestionTargetIdx < 0) currentQuestionTargetIdx = unrepliedQuestionTargets.length - 1;
+            let target = unrepliedQuestionTargets[currentQuestionTargetIdx];
+
+            var hiddenWrap = target.closest('.wa-hidden');
+            if (hiddenWrap) {
+                var classList = hiddenWrap.className.split(' ');
+                var groupClass = classList.find(c => c.startsWith('collapse-item-'));
+                if (groupClass) expandCollapseGroupAll(groupClass.split('-')[2]);
+            }
+
+            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            var oldBg = target.style.backgroundColor;
+            target.style.backgroundColor = '#ffeb3b';
+            setTimeout(() => { target.style.backgroundColor = oldBg; }, 1500);
+            currentQuestionTargetIdx--;
         }
 
         function scrollToPrevUnrepliedBlock() {
@@ -556,6 +611,9 @@ def generate_chat_html(
     script = script.replace("__VIRT_INITIAL__", str(virt_initial))
     script = script.replace("__VIRT_CHUNK__", str(virt_chunk))
     script = script.replace("__UNREPLIED_CHUNK_SIZE__", str(unreplied_chunk_size))
+    script = script.replace(
+        "__UNREPLIED_OTHER_ONLY__", "true" if unreplied_other_only else "false"
+    )
 
     html_parts.append(script)
 

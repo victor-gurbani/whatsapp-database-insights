@@ -3869,8 +3869,14 @@ if "data" in st.session_state:
                             value=1,
                             help="Search for chunks of X consecutive unreplied messages (Magnifying Glass button).",
                         )
+                        unreplied_other_only = st.checkbox(
+                            "Target Other Person Only",
+                            value=False,
+                            help="If checked, the magnifying glass (unreplied) will only target unreplied messages sent by the other person.",
+                        )
                     else:
                         unreplied_chunk_size = 1
+                        unreplied_other_only = False
 
                     collapse_replies = st.toggle(
                         "Collapse Replied-To Messages",
@@ -3966,6 +3972,7 @@ if "data" in st.session_state:
                         msgs_below=adv_msgs_below,
                         context_view=context_view,
                         unreplied_chunk_size=unreplied_chunk_size,
+                        unreplied_other_only=unreplied_other_only,
                         collapse_replies=collapse_replies,
                         virtualization=enable_virtualization,
                         virt_initial=virt_initial,
