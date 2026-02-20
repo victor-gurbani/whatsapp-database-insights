@@ -938,6 +938,14 @@ if "data" in st.session_state:
         "Exclude Groups", value=False, key="cfg_ex_groups"
     )
 
+    # Exclude Low-Participation Groups Filter
+    exclude_low_participation = st.sidebar.checkbox(
+        "Exclude Low-Participation Groups",
+        value=False,
+        key="cfg_ex_low_part",
+        help="Excludes groups (>4 members) where you sent less than 10% of the messages."
+    )
+
     # Exclude Me Filter
     exclude_me = st.sidebar.checkbox(
         "Exclude 'Me/You' from Charts",
@@ -1067,6 +1075,25 @@ if "data" in st.session_state:
     if exclude_groups and "raw_string" in df_base.columns:
         is_group = df_base["raw_string"].astype(str).str.endswith("@g.us")
         df_base = df_base[~is_group]
+        
+    if exclude_low_participation and "raw_string" in df_base.columns:
+        is_group_mask = df_base["raw_string"].astype(str).str.endswith("@g.us")
+        group_chats = df_base[is_group_mask]
+        
+        groups_to_exclude = set()
+        for chat_id, group_df in group_chats.groupby("chat_name"):
+            # Check unique participants (we use sender_string for exact accuracy)
+            unique_senders = group_df["sender_string"].nunique()
+            if unique_senders > 4:
+                total_messages = len(group_df)
+                my_messages = group_df["from_me"].sum()
+                participation_ratio = my_messages / total_messages if total_messages > 0 else 0
+                
+                if participation_ratio < 0.1:
+                    groups_to_exclude.add(chat_id)
+                    
+        if groups_to_exclude:
+            df_base = df_base[~df_base["chat_name"].isin(groups_to_exclude)]
 
     if exclude_channels and "raw_string" in df_base.columns:
         # Channels usually end in @newsletter. Status is status@broadcast. Official WA is 0@s.whatsapp.net
