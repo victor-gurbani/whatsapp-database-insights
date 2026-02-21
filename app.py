@@ -173,15 +173,17 @@ def build_distinct_color_map(names):
     return cmap
 
 
-def build_three_month_rolling_counts(
+def build_rolling_counts(
     df_input,
     count_mode="their_only",
     average_my_messages=False,
     top_candidates=120,
     time_bin="D",
+    window_offset=None,
 ):
     """
-    Build rolling 3-month message counts per contact using configurable counting mode.
+    Build rolling message counts per contact using configurable counting mode and time window.
+    window_offset: pd.DateOffset object (e.g., pd.DateOffset(months=3), defaults to 3 months)
     count_mode:
     - 'their_only': incoming messages only.
     - 'chat_total': incoming + my messages mapped to counterpart chat.
@@ -286,9 +288,11 @@ def build_three_month_rolling_counts(
     )
     daily_counts = daily_counts.reindex(full_days, fill_value=0)
 
-    # Exact calendar 3-month rolling window per day.
+    # Exact calendar rolling window per day.
+    if window_offset is None:
+        window_offset = pd.DateOffset(months=3)
     indexer = pd.api.indexers.VariableOffsetWindowIndexer(
-        index=daily_counts.index, offset=pd.DateOffset(months=3)
+        index=daily_counts.index, offset=window_offset
     )
     rolling_counts = daily_counts.rolling(window=indexer, min_periods=1).sum()
     rolling_counts = rolling_counts.loc[:, rolling_counts.max(axis=0) > 0]
@@ -297,7 +301,7 @@ def build_three_month_rolling_counts(
 
 
 def render_contact_race_video(
-    rolling_counts, top_k=10, fps=15, seconds_per_month=2.0, width=1280, height=720
+    rolling_counts, top_k=10, fps=15, seconds_per_month=2.0, width=1280, height=720, window_offset=None, window_label="3-month"
 ):
     """
     Render a dynamic top-N bar chart race video from rolling contact counts.
@@ -374,7 +378,7 @@ def render_contact_race_video(
         ax.set_ylim(top_k - 0.35, -0.65)
         ax.set_yticks([])
         ax.set_xlabel(
-            "Messages in rolling 3-month window",
+            f"Messages in rolling {window_label} window",
             color="#cbd5e1",
             fontsize=11 * resolution_scale,
         )
@@ -451,13 +455,13 @@ def render_contact_race_video(
             )
 
         current_day = data.index[0] + pd.to_timedelta(elapsed, unit="D")
-        window_start = current_day - pd.DateOffset(months=3)
+        window_start = current_day - window_offset
         range_fmt = "%b %d, %Y" if step_days >= 1 else "%b %d, %Y %H:%M"
 
         ax.text(
             0.01,
             1.06,
-            "Top 10 Contacts • 3-Month Rolling Message Race",
+            f"Top 10 Contacts • {window_label.title()} Rolling Message Race",
             transform=ax.transAxes,
             ha="left",
             va="bottom",
@@ -527,7 +531,7 @@ def render_contact_race_video(
             return {
                 "bytes": f.read(),
                 "mime": "video/mp4",
-                "filename": "contact_race_3month.mp4",
+                "filename": f"contact_race_{window_label.replace(' ', '_')}.mp4",
                 "frame_count": total_frames,
             }
     except Exception as mp4_err:
@@ -541,7 +545,7 @@ def render_contact_race_video(
                 return {
                     "bytes": f.read(),
                     "mime": "image/gif",
-                    "filename": "contact_race_3month.gif",
+                    "filename": f"contact_race_{window_label.replace(' ', '_')}.gif",
                     "frame_count": total_frames,
                     "fallback_reason": str(mp4_err),
                 }
@@ -1430,11 +1434,34 @@ if "data" in st.session_state:
             st.info("Not enough data to calculate dispersion.")
 
         st.divider()
-        st.subheader("🎬 3-Month Rolling Contact Race Video")
+        st.subheader("🎬 Rolling Contact Race Video")
         st.caption(
-            "Dynamic top-10 bar chart race in a rolling 3-month window with smooth nonlinear overtaking. "
+            "Dynamic top-10 bar chart race with adjustable rolling window and smooth nonlinear overtaking. "
             "Pacing is fixed to 1 month ≈ 2 seconds."
         )
+
+        # Window Duration Options
+        window_options = {
+            '1 day': pd.DateOffset(days=1),
+            '3 days': pd.DateOffset(days=3),
+            '1 week': pd.DateOffset(weeks=1),
+            '2 weeks': pd.DateOffset(weeks=2),
+            '1 month': pd.DateOffset(months=1),
+            '2 months': pd.DateOffset(months=2),
+            '3 months': pd.DateOffset(months=3),
+            '6 months': pd.DateOffset(months=6),
+            '9 months': pd.DateOffset(months=9),
+            '12 months': pd.DateOffset(months=12),
+        }
+
+        window_label = st.select_slider(
+            "Rolling Window Duration",
+            options=list(window_options.keys()),
+            value="3 months",
+            key="race_window_duration",
+            help="Select the rolling window size for the message race animation"
+        )
+        window_offset = window_options[window_label]
 
         race_c1, race_c2, race_c3 = st.columns(3)
         race_60fps = race_c1.checkbox(
@@ -1490,12 +1517,13 @@ if "data" in st.session_state:
                 fps_value = 60 if race_60fps else 15
                 bucket_freq = "6h" if race_60fps else "D"
                 count_mode = "chat_total" if include_chat_sum else "their_only"
-                rolling_counts = build_three_month_rolling_counts(
+                rolling_counts = build_rolling_counts(
                     df_base,
                     count_mode=count_mode,
                     average_my_messages=(average_my_msgs and include_chat_sum),
                     top_candidates=candidate_pool,
                     time_bin=bucket_freq,
+                    window_offset=window_offset,
                 )
 
                 if rolling_counts.empty:
@@ -1517,6 +1545,8 @@ if "data" in st.session_state:
                         seconds_per_month=seconds_per_month,
                         width=width,
                         height=height,
+                        window_offset=window_offset,
+                        window_label=window_label,
                     )
                     months_span = max(
                         (
