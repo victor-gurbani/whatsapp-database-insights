@@ -24,8 +24,8 @@ def generate_chat_html(
     if chat_df.empty:
         return "<p>No messages in this chat.</p>"
 
-
     import re
+
     pos_emojis = re.compile(r"[😂🤣❤️😍😊😁👍🙌🎉✨🔥]")
     neg_emojis = re.compile(r"[😡🤬😠🖕👎💔😭😢🙄]")
     pos_words = re.compile(
@@ -49,11 +49,14 @@ def generate_chat_html(
     )
 
     def get_sentiment(text):
-        if not isinstance(text, str): return 0
+        if not isinstance(text, str):
+            return 0
         p = len(pos_emojis.findall(text)) + len(pos_words.findall(text))
         n = len(neg_emojis.findall(text)) + len(neg_words.findall(text))
-        if p > n: return 1
-        if n > p: return -1
+        if p > n:
+            return 1
+        if n > p:
+            return -1
         return 0
 
     # 1. Base Setup
@@ -110,9 +113,16 @@ def generate_chat_html(
                     count = 0
                     curr_check = prev_idx
                     while curr_check >= 0 and count < 2:
-                        if chat_df.iloc[curr_check]["is_me"] == prev_sender:
-                            context_target_indices.add(curr_check)
-                            count += 1
+                        curr_row = chat_df.iloc[curr_check]
+                        if curr_row["is_me"] == prev_sender:
+                            reactions = curr_row.get("reactions_list")
+                            has_reactions = (
+                                isinstance(reactions, list) and len(reactions) > 0
+                            )
+
+                            if not has_reactions:
+                                context_target_indices.add(curr_check)
+                                count += 1
                             curr_check -= 1
                         else:
                             break
@@ -154,6 +164,14 @@ def generate_chat_html(
             highlight_class = "highlight-adv-context"
         elif idx in context_target_indices:
             highlight_class = "highlight-unreplied-context"
+
+        reactions = row.get("reactions_list")
+        has_reactions = isinstance(reactions, list) and len(reactions) > 0
+        if has_reactions:
+            if highlight_class:
+                highlight_class += " highlight-reacted"
+            else:
+                highlight_class = "highlight-reacted"
 
         sender_name = ""
         if not is_me and last_sender != is_me:
@@ -203,6 +221,9 @@ def generate_chat_html(
                 "rep_sender": rep_sender,
                 "rep_target_idx": rep_target_idx,
                 "should_collapse": bool(should_collapse),
+                "reactions": row.get("reactions_list")
+                if isinstance(row.get("reactions_list"), list)
+                else [],
             }
         )
 
@@ -219,7 +240,13 @@ def generate_chat_html(
         .wa-search-bar:focus { border-color: #35cd96; }
         .wa-container { flex: 1; min-height: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #e5ddd5; background-image: url("https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png"); padding: 20px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; border-radius: 8px; scroll-behavior: smooth; position: relative; }
         .wa-message-wrap { display: flex; flex-direction: column; width: 100%; }
-        .wa-message { max-width: 65%; padding: 8px 12px; border-radius: 7.5px; position: relative; font-size: 14px; line-height: 19px; box-shadow: 0 1px 0.5px rgba(0,0,0,0.13); display: inline-block; word-wrap: break-word; transition: background-color 1.5s; }
+        .wa-message { max-width: 65%; padding: 8px 12px; border-radius: 7.5px; position: relative; font-size: 14px; line-height: 19px; box-shadow: 0 1px 0.5px rgba(0,0,0,0.13); display: inline-block; word-wrap: break-word; transition: background-color 1.5s; margin-bottom: 6px; }
+        .wa-message.has-reactions { padding-bottom: 12px; margin-bottom: 16px; }
+        .wa-reactions-container { position: absolute; bottom: -12px; right: 0px; display: flex; flex-direction: row; gap: 4px; background-color: #fff; padding: 2px 5px; border-radius: 12px; box-shadow: 0 1px 2px rgba(0,0,0,0.15); border: 1px solid #fff; z-index: 10; align-items: center; }
+        .wa-me .wa-reactions-container { background-color: #dcf8c6; border-color: #dcf8c6; }
+        .wa-them .wa-reactions-container { background-color: #fff; border-color: #fff; }
+        .wa-reaction { font-size: 12px; display: flex; align-items: center; gap: 3px; cursor: default; user-select: none; }
+        .wa-reaction-count { color: #888; font-weight: bold; font-size: 10px; }
         .wa-me { align-self: flex-end; background-color: #dcf8c6; border-top-right-radius: 0; }
         .wa-them { align-self: flex-start; background-color: #ffffff; border-top-left-radius: 0; }
         .wa-time { font-size: 11px; color: rgba(0,0,0,0.45); margin-left: 10px; float: right; margin-top: 5px; }
@@ -229,6 +256,7 @@ def generate_chat_html(
         .highlight-reply-target { box-shadow: 0 0 10px 2px #ff9800 !important; border: 2px solid #ff9800; background-color: #fff3e0 !important; }
         .highlight-adv-context { box-shadow: 0 0 10px 2px #03a9f4 !important; border: 2px dashed #03a9f4; opacity: 0.9; }
         .highlight-unreplied-context { box-shadow: 0 0 10px 2px #e91e63 !important; border: 2px solid #e91e63; background-color: #fce4ec !important; }
+        .highlight-reacted { box-shadow: 0 0 8px 1px #9c27b0 !important; border: 1px solid #9c27b0; }
         .highlight-search { background-color: #fff59d !important; color: #000; padding: 0 2px; border-radius: 3px; }
         .wa-sender-name { font-size: 12.5px; font-weight: 500; color: #35cd96; margin-bottom: 2px; }
         .wa-floating-btn { position: fixed; right: 35px; background-color: #fff; color: #128C7E; border: none; border-radius: 50%; width: 40px; height: 40px; box-shadow: 0 2px 5px rgba(0,0,0,0.2); cursor: pointer; font-size: 20px; display: flex; align-items: center; justify-content: center; z-index: 1000; }
@@ -327,6 +355,9 @@ def generate_chat_html(
             let classStr = "wa-message " + (msg.is_me ? "wa-me" : "wa-them");
             if (msg.highlight_class) classStr += " " + msg.highlight_class;
             
+            let hasReactions = msg.reactions && msg.reactions.length > 0;
+            if (hasReactions) classStr += " has-reactions";
+            
             htmlParts.push('<div class="wa-message-wrap">');
             htmlParts.push(`<div class="${classStr}" id="msg-${msg.idx}">`);
             if (msg.sender_name) htmlParts.push(`<div class="wa-sender-name">${escapeHtml(msg.sender_name)}</div>`);
@@ -352,6 +383,32 @@ def generate_chat_html(
             
             let timeHtml = ENABLE_TOOLTIPS && msg.full_time ? `<span class="wa-time" title="${msg.full_time}">${msg.time_str}</span>` : `<span class="wa-time">${msg.time_str}</span>`;
             htmlParts.push(timeHtml);
+            
+            if (hasReactions) {
+                let reactionCounts = {};
+                let reactionSenders = {};
+                msg.reactions.forEach(r => {
+                    let emoji = r[0] || '';
+                    let sender = r[1] || '';
+                    if (!reactionCounts[emoji]) {
+                        reactionCounts[emoji] = 0;
+                        reactionSenders[emoji] = [];
+                    }
+                    reactionCounts[emoji]++;
+                    reactionSenders[emoji].push(sender);
+                });
+                
+                let reactionsHtml = '<div class="wa-reactions-container">';
+                for (let emoji in reactionCounts) {
+                    let count = reactionCounts[emoji];
+                    let senders = escapeHtml(reactionSenders[emoji].join(", "));
+                    let countHtml = count > 1 ? `<span class="wa-reaction-count">${count}</span>` : '';
+                    reactionsHtml += `<div class="wa-reaction" title="${senders}">${emoji}${countHtml}</div>`;
+                }
+                reactionsHtml += '</div>';
+                htmlParts.push(reactionsHtml);
+            }
+            
             htmlParts.push('</div></div>');
             return htmlParts.join("\\n");
         }
@@ -734,9 +791,7 @@ def generate_chat_html(
     script = script.replace(
         "__ENABLE_TOOLTIPS__", "true" if enable_tooltips else "false"
     )
-    script = script.replace(
-        "__ENABLE_MINIMAP__", "true" if enable_minimap else "false"
-    )
+    script = script.replace("__ENABLE_MINIMAP__", "true" if enable_minimap else "false")
     script = script.replace(
         "__ENABLE_SENTIMENT__", "true" if enable_sentiment else "false"
     )
@@ -814,7 +869,22 @@ def export_chat_txt(chat_df, flip_sides=False, my_name="Me"):
             rep_text = str(id_to_text[reply_to_id]).replace(chr(10), " ")[:50]
             reply_str = f" [Replying to: {rep_text}...]"
 
+        reactions_str = ""
+        reactions = row.get("reactions_list")
+        if isinstance(reactions, list) and len(reactions) > 0:
+            reaction_parts = []
+            for reaction_tuple in reactions:
+                if (
+                    isinstance(reaction_tuple, (list, tuple))
+                    and len(reaction_tuple) >= 2
+                ):
+                    emoji = str(reaction_tuple[0])
+                    sender_name = str(reaction_tuple[1])
+                    reaction_parts.append(f"{sender_name} with {emoji}")
+            if reaction_parts:
+                reactions_str = f" (Reacted by {' | '.join(reaction_parts)})"
+
         text = text.replace(chr(10), " | ")
-        lines.append(f"[{time_str}] {sender}: {text}{reply_str}")
+        lines.append(f"[{time_str}] {sender}: {text}{reply_str}{reactions_str}")
 
     return "\n".join(lines)
