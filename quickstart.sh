@@ -23,6 +23,10 @@ done
 if [ -n "$TERMUX_VERSION" ]; then
     echo "🤖 Termux environment detected!"
     USE_VENV=false
+    
+    # Crucial for building Rust/C extensions via pip on Termux (like rpds-py, tornado)
+    export ANDROID_API_LEVEL=24
+    
     echo "📦 Installing required packages via pkg..."
     pkg install -y tur-repo
     pkg install -y python-numpy matplotlib python-pyarrow python-pandas
@@ -103,6 +107,36 @@ if [ -f "wa_analyzer/requirements.txt" ]; then
 else
     echo "⚠️  requirements.txt not found, installing essential packages..."
     $PYTHON_CMD -m pip install streamlit pandas plotly matplotlib seaborn wordcloud emoji gender-guesser vobject attrs --quiet
+fi
+
+# Termux post-install fix for Streamlit
+if [ -n "$TERMUX_VERSION" ]; then
+    echo "🔧 Applying Termux-specific fixes for Streamlit..."
+    
+    # Disable telemetry to prevent startup prompts
+    mkdir -p ~/.streamlit
+    if [ ! -f ~/.streamlit/config.toml ] || ! grep -q "gatherUsageStats" ~/.streamlit/config.toml; then
+        echo "[browser]" >> ~/.streamlit/config.toml
+        echo "gatherUsageStats = false" >> ~/.streamlit/config.toml
+    fi
+
+    # Patch streamlit so it can open the browser on Android
+    $PYTHON_CMD -c '
+import os
+try:
+    import streamlit
+    path = os.path.join(os.path.dirname(streamlit.__file__), "cli_util.py")
+    with open(path, "r") as f:
+        content = f.read()
+    old_code = "    import platform\n\n    raise errors.Error"
+    new_code = "    import platform\n    if platform.system() == \"Android\":\n        _open_browser_with_command(\"termux-open\", url)\n        return\n\n    raise errors.Error"
+    if old_code in content:
+        content = content.replace(old_code, new_code)
+        with open(path, "w") as f:
+            f.write(content)
+except Exception:
+    pass
+'
 fi
 
 # --- 6. Run the Streamlit app ---
