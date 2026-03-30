@@ -301,7 +301,14 @@ def build_rolling_counts(
 
 
 def render_contact_race_video(
-    rolling_counts, top_k=10, fps=15, seconds_per_month=2.0, width=1280, height=720, window_offset=None, window_label="3-month"
+    rolling_counts,
+    top_k=10,
+    fps=15,
+    seconds_per_month=2.0,
+    width=1280,
+    height=720,
+    window_offset=None,
+    window_label="3-month",
 ):
     """
     Render a dynamic top-N bar chart race video from rolling contact counts.
@@ -947,7 +954,7 @@ if "data" in st.session_state:
         "Exclude Low-Participation Groups",
         value=False,
         key="cfg_ex_low_part",
-        help="Excludes groups (>4 members) where you sent less than 10% of the messages."
+        help="Excludes groups (>4 members) where you sent less than 10% of the messages.",
     )
 
     # Exclude Me Filter
@@ -1079,11 +1086,11 @@ if "data" in st.session_state:
     if exclude_groups and "raw_string" in df_base.columns:
         is_group = df_base["raw_string"].astype(str).str.endswith("@g.us")
         df_base = df_base[~is_group]
-        
+
     if exclude_low_participation and "raw_string" in df_base.columns:
         is_group_mask = df_base["raw_string"].astype(str).str.endswith("@g.us")
         group_chats = df_base[is_group_mask]
-        
+
         groups_to_exclude = set()
         for chat_id, group_df in group_chats.groupby("chat_name"):
             # Check unique participants (we use sender_string for exact accuracy)
@@ -1091,11 +1098,13 @@ if "data" in st.session_state:
             if unique_senders > 4:
                 total_messages = len(group_df)
                 my_messages = group_df["from_me"].sum()
-                participation_ratio = my_messages / total_messages if total_messages > 0 else 0
-                
+                participation_ratio = (
+                    my_messages / total_messages if total_messages > 0 else 0
+                )
+
                 if participation_ratio < 0.1:
                     groups_to_exclude.add(chat_id)
-                    
+
         if groups_to_exclude:
             df_base = df_base[~df_base["chat_name"].isin(groups_to_exclude)]
 
@@ -1442,16 +1451,16 @@ if "data" in st.session_state:
 
         # Window Duration Options
         window_options = {
-            '1 day': pd.DateOffset(days=1),
-            '3 days': pd.DateOffset(days=3),
-            '1 week': pd.DateOffset(weeks=1),
-            '2 weeks': pd.DateOffset(weeks=2),
-            '1 month': pd.DateOffset(months=1),
-            '2 months': pd.DateOffset(months=2),
-            '3 months': pd.DateOffset(months=3),
-            '6 months': pd.DateOffset(months=6),
-            '9 months': pd.DateOffset(months=9),
-            '12 months': pd.DateOffset(months=12),
+            "1 day": pd.DateOffset(days=1),
+            "3 days": pd.DateOffset(days=3),
+            "1 week": pd.DateOffset(weeks=1),
+            "2 weeks": pd.DateOffset(weeks=2),
+            "1 month": pd.DateOffset(months=1),
+            "2 months": pd.DateOffset(months=2),
+            "3 months": pd.DateOffset(months=3),
+            "6 months": pd.DateOffset(months=6),
+            "9 months": pd.DateOffset(months=9),
+            "12 months": pd.DateOffset(months=12),
         }
 
         window_label = st.select_slider(
@@ -1459,7 +1468,7 @@ if "data" in st.session_state:
             options=list(window_options.keys()),
             value="3 months",
             key="race_window_duration",
-            help="Select the rolling window size for the message race animation"
+            help="Select the rolling window size for the message race animation",
         )
         window_offset = window_options[window_label]
 
