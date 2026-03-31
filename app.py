@@ -1207,18 +1207,20 @@ if "data" in st.session_state:
     analyzer = WhatsappAnalyzer(filtered_df, use_medians=use_medians)
     full_analyzer = WhatsappAnalyzer(df_base, use_medians=use_medians)
 
-    # --- KPI Row ---
-    # Fix: Calculate Stats from df_base (Unfiltered) to avoid "Sent: 0" when Exclude Me is on
-    total_msgs_raw = len(df_base)
-    sent_raw = df_base[df_base["from_me"] == 1].shape[0]
-    received_raw = total_msgs_raw - sent_raw
-    unique_contacts_raw = df_base["contact_name"].nunique()
+    @st.fragment
+    def _frag_kpi():
+        total_msgs_raw = len(df_base)
+        sent_raw = df_base[df_base["from_me"] == 1].shape[0]
+        received_raw = total_msgs_raw - sent_raw
+        unique_contacts_raw = df_base["contact_name"].nunique()
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total Messages", f"{av(total_msgs_raw, _anon_numbers):,}")
-    col2.metric("Sent", f"{av(sent_raw, _anon_numbers):,}")
-    col3.metric("Received", f"{av(received_raw, _anon_numbers):,}")
-    col4.metric("Unique Contacts", av(unique_contacts_raw, _anon_numbers))
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total Messages", f"{av(total_msgs_raw, _anon_numbers):,}")
+        col2.metric("Sent", f"{av(sent_raw, _anon_numbers):,}")
+        col3.metric("Received", f"{av(received_raw, _anon_numbers):,}")
+        col4.metric("Unique Contacts", av(unique_contacts_raw, _anon_numbers))
+
+    _frag_kpi()
 
     # --- Tabs ---
     tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(
