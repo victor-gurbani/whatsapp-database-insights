@@ -829,34 +829,37 @@ with st.sidebar.expander("💾 Configuration Manager", expanded=False):
     )
 
 base_dir = os.getcwd()
-# Defaults
 default_msgstore = os.path.join(base_dir, "msgstore.db")
 default_wa = os.path.join(base_dir, "wa.db")
 default_vcf = os.path.join(base_dir, "contacts.vcf")
 
-# Widgets with Keys
-msgstore_path = st.sidebar.text_input(
-    "Msgstore Path",
-    value=default_msgstore if os.path.exists(default_msgstore) else "",
-    key="cfg_msgstore",
-)
-wa_path = st.sidebar.text_input(
-    "WA DB Path", value=default_wa if os.path.exists(default_wa) else "", key="cfg_wa"
-)
-vcf_path = st.sidebar.text_input(
-    "VCF Path", value=default_vcf if os.path.exists(default_vcf) else "", key="cfg_vcf"
-)
+with st.sidebar.expander("📂 Data Source", expanded="data" not in st.session_state):
+    msgstore_path = st.text_input(
+        "Msgstore Path",
+        value=default_msgstore if os.path.exists(default_msgstore) else "",
+        key="cfg_msgstore",
+    )
+    wa_path = st.text_input(
+        "WA DB Path",
+        value=default_wa if os.path.exists(default_wa) else "",
+        key="cfg_wa",
+    )
+    vcf_path = st.text_input(
+        "VCF Path",
+        value=default_vcf if os.path.exists(default_vcf) else "",
+        key="cfg_vcf",
+    )
 
-if st.sidebar.button("Load Data"):
-    with st.spinner("Parsing databases..."):
-        parser = WhatsappParser(msgstore_path, wa_path, vcf_path)
-        df = parser.get_merged_data()
+    if st.button("Load Data"):
+        with st.spinner("Parsing databases..."):
+            parser = WhatsappParser(msgstore_path, wa_path, vcf_path)
+            df = parser.get_merged_data()
 
-        if df.empty:
-            st.error("Failed to parse data or no messages found.")
-        else:
-            st.session_state["data"] = df
-            st.success(f"Loaded {len(df)} messages!")
+            if df.empty:
+                st.error("Failed to parse data or no messages found.")
+            else:
+                st.session_state["data"] = df
+                st.success(f"Loaded {len(df)} messages!")
 
 if "data" in st.session_state:
     df_raw = st.session_state["data"]
@@ -891,192 +894,168 @@ if "data" in st.session_state:
             st.session_state["_anon_data_ver"] = id(st.session_state["data"])
         df_raw = st.session_state[_anon_cache_key]
 
-    # --- Sidebar Filtering ---
-    st.sidebar.subheader("Filters")
+    with st.sidebar.expander("📅 Date Range", expanded=True):
+        min_date = df_raw["timestamp"].min().date()
+        max_date = df_raw["timestamp"].max().date()
 
-    # Date Filter
-    min_date = df_raw["timestamp"].min().date()
-    max_date = df_raw["timestamp"].max().date()
+        st.caption("Quick Date Filters")
+        cols_q = st.columns(5)
+        labels = ["3M", "6M", "1Y", "3Y", "10Y"]
+        offsets = [3, 6, 12, 36, 120]
 
-    # We pass the default value here. If 'cfg_date_range' is already in session_state
-    # (e.g. from loaded config), Streamlit will use that value instead.
-    # We do NOT manually set session_state['cfg_date_range'] here to avoid conflicts.
+        def _set_date_range(start, end):
+            st.session_state["cfg_date_range"] = [start, end]
 
-    # Quick Date Buttons
-    st.sidebar.caption("Quick Date Filters")
-    cols_q = st.sidebar.columns(5)
-    labels = ["3M", "6M", "1Y", "3Y", "10Y"]
-    offsets = [3, 6, 12, 36, 120]  # Months
-
-    def _set_date_range(start, end):
-        """Callback for quick-date buttons — sets state before rerun."""
-        st.session_state["cfg_date_range"] = [start, end]
-
-    for i, label in enumerate(labels):
-        new_start = max_date - pd.DateOffset(months=offsets[i])
-        new_start = new_start.date()
-        if new_start < min_date:
-            new_start = min_date
-        cols_q[i].button(
-            label,
-            on_click=_set_date_range,
-            args=(new_start, max_date),
-        )
-
-    st.sidebar.button(
-        "Reset Date",
-        on_click=_set_date_range,
-        args=(min_date, max_date),
-    )
-
-    date_range = st.sidebar.date_input(
-        "Date Range",
-        value=[min_date, max_date],
-        min_value=min_date,
-        max_value=max_date,
-        key="cfg_date_range",
-    )
-
-    # --- Identity Status ---
-    st.sidebar.markdown("### 👤 Identity Status")
-    n_sent = len(df_raw[df_raw["from_me"] == 1])
-    n_recv = len(df_raw[df_raw["from_me"] == 0])
-    st.sidebar.caption(
-        f"Detected **{av(n_sent, _anon_numbers):,}** sent and **{av(n_recv, _anon_numbers):,}** received messages."
-    )
-    st.sidebar.divider()
-
-    st.sidebar.subheader("🔒 Anonymisation")
-    anon_mode = st.sidebar.selectbox(
-        "Anonymisation Mode",
-        ["Off", "Hash All", "Hash + Cut (8 chars)", "Fully Randomised"],
-        key="cfg_anon_mode",
-        help="Anonymise contact names/labels before processing. All stats and charts update normally.",
-    )
-    if anon_mode != "Off":
-        st.sidebar.checkbox(
-            "Also anonymise numeric values",
-            value=False,
-            key="cfg_anon_numbers",
-            help="Replace absolute numbers (message counts, reply times, etc.) with randomised values of similar magnitude.",
-        )
-    st.sidebar.divider()
-
-    # Exclude Groups Filter
-    exclude_groups = st.sidebar.checkbox(
-        "Exclude Groups", value=False, key="cfg_ex_groups"
-    )
-
-    # Exclude Low-Participation Groups Filter
-    exclude_low_participation = st.sidebar.checkbox(
-        "Exclude Low-Participation Groups",
-        value=False,
-        key="cfg_ex_low_part",
-        help="Excludes groups (>4 members) where you sent less than 10% of the messages.",
-    )
-
-    # Exclude Me Filter
-    exclude_me = st.sidebar.checkbox(
-        "Exclude 'Me/You' from Charts",
-        value=True,
-        key="cfg_ex_me",
-        help="Remove your own sent messages from Activity and Top Talkers charts.",
-    )
-
-    # Family Filter
-    st.sidebar.subheader("Contact Management")
-    all_contacts = sorted(df_raw["contact_name"].unique().astype(str))
-
-    # Try to find "Me" or "You" for default selection
-    default_fam = []
-    if "cfg_fam_list" not in st.session_state:
-        for candidate in ["You", "Me", "Myself", "Tú", "Yo"]:
-            match = next(
-                (c for c in all_contacts if candidate.lower() == c.lower()), None
+        for i, label in enumerate(labels):
+            new_start = max_date - pd.DateOffset(months=offsets[i])
+            new_start = new_start.date()
+            if new_start < min_date:
+                new_start = min_date
+            cols_q[i].button(
+                label,
+                on_click=_set_date_range,
+                args=(new_start, max_date),
             )
-            if match:
-                default_fam.append(match)
-    else:
-        # Pre-fill with what's in session state if available, but ensure it exists in all_contacts
-        # Actually standard behavior of multiselect with 'default' is tricky if key exists.
-        # If key exists, it overrides 'default'. So we just depend on key.
-        pass
 
-    family_list = st.sidebar.multiselect(
-        "Select Family / Close Contacts",
-        all_contacts,
-        default=default_fam if "cfg_fam_list" not in st.session_state else None,
-        key="cfg_fam_list",
-    )
+        st.button(
+            "Reset Date",
+            on_click=_set_date_range,
+            args=(min_date, max_date),
+        )
 
-    exclude_family_global = st.sidebar.checkbox(
-        "Exclude Family from ALL Stats", value=False, key="cfg_ex_fam_glob"
-    )
-    exclude_non_contacts = st.sidebar.checkbox(
-        "Exclude Non-Contacts from ALL Stats", value=False, key="cfg_ex_non_con"
-    )
-    exclude_channels = st.sidebar.checkbox(
-        "Exclude Channels / Announcements",
-        value=True,
-        help="Removes WhatsApp Channels (@newsletter) and Status Broadcasts",
-        key="cfg_ex_chan",
-    )
-    exclude_system = st.sidebar.checkbox(
-        "Exclude System / Security Messages",
-        value=True,
-        help="Removes encryption notices and system markers (Type 7)",
-        key="cfg_ex_system",
-    )
-    exclude_family_gender = st.sidebar.checkbox(
-        "Exclude Family from GENDER Stats Only", value=False, key="cfg_ex_fam_gend"
-    )
-    exclude_family_behavior = st.sidebar.checkbox(
-        "Exclude Family from BEHAVIORAL Stats", value=False, key="cfg_ex_fam_beh"
-    )
+        date_range = st.date_input(
+            "Date Range",
+            value=[min_date, max_date],
+            min_value=min_date,
+            max_value=max_date,
+            key="cfg_date_range",
+        )
 
-    # Behavioral Config
-    st.sidebar.subheader("Behavioral Config")
-    use_medians = st.sidebar.checkbox(
-        "Use Median for Stats",
-        value=False,
-        help="Switch between Average and Median for all statistical metrics (Reply times, write times, word counts).",
-        key="cfg_use_median",
-    )
+        n_sent = len(df_raw[df_raw["from_me"] == 1])
+        n_recv = len(df_raw[df_raw["from_me"] == 0])
+        st.caption(
+            f"**{av(n_sent, _anon_numbers):,}** sent · **{av(n_recv, _anon_numbers):,}** received"
+        )
 
-    def _on_longer_stats_toggle():
-        if st.session_state["cfg_long_stats"]:
-            st.session_state["cfg_reply_thresh"] = 48
-        else:
-            st.session_state["cfg_reply_thresh"] = 12
+    with st.sidebar.expander("🔒 Anonymisation", expanded=False):
+        anon_mode = st.selectbox(
+            "Anonymisation Mode",
+            ["Off", "Hash All", "Hash + Cut (8 chars)", "Fully Randomised"],
+            key="cfg_anon_mode",
+            help="Anonymise contact names/labels before processing. All stats and charts update normally.",
+        )
+        if anon_mode != "Off":
+            st.checkbox(
+                "Also anonymise numeric values",
+                value=False,
+                key="cfg_anon_numbers",
+                help="Replace absolute numbers (message counts, reply times, etc.) with randomised values of similar magnitude.",
+            )
 
-    use_longer_stats = st.sidebar.checkbox(
-        "Use Longer Time Stats",
-        value=False,
-        help="Ghosting: 5 days (vs 24h), Initiation: 2 days (vs 6h), Reply threshold: 48h (vs 12h)",
-        key="cfg_long_stats",
-        on_change=_on_longer_stats_toggle,
-    )
+    with st.sidebar.expander("🔍 Filters", expanded=False):
+        exclude_groups = st.checkbox("Exclude Groups", value=False, key="cfg_ex_groups")
 
-    reply_threshold_hours = st.sidebar.slider(
-        "Max Reply Delay (Hours)",
-        min_value=1,
-        max_value=120,
-        value=12,
-        help="Messages after this delay are considered new conversations, not replies.",
-        key="cfg_reply_thresh",
-    )
+        exclude_low_participation = st.checkbox(
+            "Exclude Low-Participation Groups",
+            value=False,
+            key="cfg_ex_low_part",
+            help="Excludes groups (>4 members) where you sent less than 10% of the messages.",
+        )
 
-    min_word_len = st.sidebar.number_input(
-        "Min Word Length (Word Cloud)",
-        min_value=1,
-        max_value=20,
-        value=4,
-        key="cfg_min_word_len",
-    )
+        exclude_me = st.checkbox(
+            "Exclude 'Me/You' from Charts",
+            value=True,
+            key="cfg_ex_me",
+            help="Remove your own sent messages from Activity and Top Talkers charts.",
+        )
 
-    exclude_emails = st.sidebar.checkbox(
-        "Exclude Emails from Word Cloud", value=False, key="cfg_ex_emails"
-    )
+        exclude_channels = st.checkbox(
+            "Exclude Channels / Announcements",
+            value=True,
+            help="Removes WhatsApp Channels (@newsletter) and Status Broadcasts",
+            key="cfg_ex_chan",
+        )
+        exclude_system = st.checkbox(
+            "Exclude System / Security Messages",
+            value=True,
+            help="Removes encryption notices and system markers (Type 7)",
+            key="cfg_ex_system",
+        )
+
+    with st.sidebar.expander("👥 Contact Management", expanded=False):
+        all_contacts = sorted(df_raw["contact_name"].unique().astype(str))
+
+        default_fam = []
+        if "cfg_fam_list" not in st.session_state:
+            for candidate in ["You", "Me", "Myself", "Tú", "Yo"]:
+                match = next(
+                    (c for c in all_contacts if candidate.lower() == c.lower()), None
+                )
+                if match:
+                    default_fam.append(match)
+
+        family_list = st.multiselect(
+            "Select Family / Close Contacts",
+            all_contacts,
+            default=default_fam if "cfg_fam_list" not in st.session_state else None,
+            key="cfg_fam_list",
+        )
+
+        exclude_family_global = st.checkbox(
+            "Exclude Family from ALL Stats", value=False, key="cfg_ex_fam_glob"
+        )
+        exclude_non_contacts = st.checkbox(
+            "Exclude Non-Contacts from ALL Stats", value=False, key="cfg_ex_non_con"
+        )
+        exclude_family_gender = st.checkbox(
+            "Exclude Family from GENDER Stats Only", value=False, key="cfg_ex_fam_gend"
+        )
+        exclude_family_behavior = st.checkbox(
+            "Exclude Family from BEHAVIORAL Stats", value=False, key="cfg_ex_fam_beh"
+        )
+
+    with st.sidebar.expander("⚙️ Behavioral Config", expanded=False):
+        use_medians = st.checkbox(
+            "Use Median for Stats",
+            value=False,
+            help="Switch between Average and Median for all statistical metrics (Reply times, write times, word counts).",
+            key="cfg_use_median",
+        )
+
+        def _on_longer_stats_toggle():
+            if st.session_state["cfg_long_stats"]:
+                st.session_state["cfg_reply_thresh"] = 48
+            else:
+                st.session_state["cfg_reply_thresh"] = 12
+
+        use_longer_stats = st.checkbox(
+            "Use Longer Time Stats",
+            value=False,
+            help="Ghosting: 5 days (vs 24h), Initiation: 2 days (vs 6h), Reply threshold: 48h (vs 12h)",
+            key="cfg_long_stats",
+            on_change=_on_longer_stats_toggle,
+        )
+
+        reply_threshold_hours = st.slider(
+            "Max Reply Delay (Hours)",
+            min_value=1,
+            max_value=120,
+            value=12,
+            help="Messages after this delay are considered new conversations, not replies.",
+            key="cfg_reply_thresh",
+        )
+
+        min_word_len = st.number_input(
+            "Min Word Length (Word Cloud)",
+            min_value=1,
+            max_value=20,
+            value=4,
+            key="cfg_min_word_len",
+        )
+
+        exclude_emails = st.checkbox(
+            "Exclude Emails from Word Cloud", value=False, key="cfg_ex_emails"
+        )
 
     # Apply Global Filters
     def is_number(name):
