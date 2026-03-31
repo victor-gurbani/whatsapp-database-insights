@@ -1206,7 +1206,8 @@ if "data" in st.session_state:
         ]
     )
 
-    with tab1:
+    @st.fragment
+    def _frag_activity():
         col_l, col_r = st.columns(2)
 
         with col_l:
@@ -1635,7 +1636,11 @@ if "data" in st.session_state:
                 f"Approx length: {race_payload.get('approx_seconds', 0):.1f}s"
             )
 
-    with tab2:
+    with tab1:
+        _frag_activity()
+
+    @st.fragment
+    def _frag_behavioral():
         st.header("Behavioral Analysis")
 
         # USE FULL ANALYZER (Includes 'Me') for interactions
@@ -1985,7 +1990,11 @@ if "data" in st.session_state:
         else:
             st.info("No write time history found (Receipts might be disabled).")
 
-    with tab3:
+    with tab2:
+        _frag_behavioral()
+
+    @st.fragment
+    def _frag_gender():
         st.header("Demographics")
         # Use full_analyzer to ensure Reply Time calc has 'Me' messages
         # analyze_by_gender() handles 'from_me=0' internally for volume.
@@ -2034,7 +2043,11 @@ if "data" in st.session_state:
                 )
                 st.plotly_chart(fig_comp, width="stretch")
 
-    with tab4:
+    with tab3:
+        _frag_gender()
+
+    @st.fragment
+    def _frag_wordcloud():
         st.header("Word Cloud")
 
         wc_source = st.radio(
@@ -2065,7 +2078,11 @@ if "data" in st.session_state:
                 else:
                     st.warning("Not enough text data.")
 
-    with tab5:
+    with tab4:
+        _frag_wordcloud()
+
+    @st.fragment
+    def _frag_chat_explorer():
         st.header("Chat Explorer & Deep Dive")
         contacts = sorted(filtered_df["contact_name"].unique().astype(str))
         selected_contact = st.selectbox(
@@ -2718,7 +2735,11 @@ if "data" in st.session_state:
                 sub_df[cols_to_show].sort_values("timestamp", ascending=False).head(10)
             )
 
-    with tab6:
+    with tab5:
+        _frag_chat_explorer()
+
+    @st.fragment
+    def _frag_group_explorer():
         st.header("👥 Group Explorer & Member Comparison")
         st.caption(
             "Deep dive into group dynamics, member activity, reply speed, and read behavior."
@@ -3518,7 +3539,11 @@ if "data" in st.session_state:
                             use_container_width=True,
                         )
 
-    with tab7:
+    with tab6:
+        _frag_group_explorer()
+
+    @st.fragment
+    def _frag_fun_insights():
         st.header("🎪 Fun & Insights")
 
         col_fun_ctrl1, col_fun_ctrl2 = st.columns(2)
@@ -4056,7 +4081,11 @@ if "data" in st.session_state:
                 )
                 st.plotly_chart(fig_dry, width="stretch")
 
-    with tab8:
+    with tab7:
+        _frag_fun_insights()
+
+    @st.fragment
+    def _frag_map():
         st.header("🗺️ Location Map")
         loc_data = analyzer.get_location_data()
         if not loc_data.empty:
@@ -4065,7 +4094,11 @@ if "data" in st.session_state:
         else:
             st.info("No location data found in this backup.")
 
-    with tab9:
+    with tab8:
+        _frag_map()
+
+    @st.fragment
+    def _frag_chat_viewer():
         st.header("📱 WhatsApp Chat Viewer")
         st.write("Preview your chats exactly as they look in WhatsApp.")
 
@@ -4300,6 +4333,9 @@ if "data" in st.session_state:
                 st.components.v1.html(html_output, height=620, scrolling=False)
         else:
             st.info("Load data to preview chats.")
+
+    with tab9:
+        _frag_chat_viewer()
 
 else:
     st.info("👈 Please enter file paths.")
