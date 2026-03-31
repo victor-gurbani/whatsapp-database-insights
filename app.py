@@ -897,19 +897,26 @@ if "data" in st.session_state:
     labels = ["3M", "6M", "1Y", "3Y", "10Y"]
     offsets = [3, 6, 12, 36, 120]  # Months
 
-    for i, label in enumerate(labels):
-        if cols_q[i].button(label):
-            new_start = max_date - pd.DateOffset(months=offsets[i])
-            # Convert to date object because date_input expects dates
-            new_start = new_start.date()
-            if new_start < min_date:
-                new_start = min_date
-            st.session_state["cfg_date_range"] = [new_start, max_date]
-            st.rerun()
+    def _set_date_range(start, end):
+        """Callback for quick-date buttons — sets state before rerun."""
+        st.session_state["cfg_date_range"] = [start, end]
 
-    if st.sidebar.button("Reset Date"):
-        st.session_state["cfg_date_range"] = [min_date, max_date]
-        st.rerun()
+    for i, label in enumerate(labels):
+        new_start = max_date - pd.DateOffset(months=offsets[i])
+        new_start = new_start.date()
+        if new_start < min_date:
+            new_start = min_date
+        cols_q[i].button(
+            label,
+            on_click=_set_date_range,
+            args=(new_start, max_date),
+        )
+
+    st.sidebar.button(
+        "Reset Date",
+        on_click=_set_date_range,
+        args=(min_date, max_date),
+    )
 
     date_range = st.sidebar.date_input(
         "Date Range",
