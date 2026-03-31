@@ -56,6 +56,7 @@ def _anon_random(name):
     return letters + digits
 
 
+@st.cache_data(show_spinner=False)
 def build_anon_map(unique_names, mode):
     """
     Build a stable mapping {original_name → anonymised_name}.
@@ -878,8 +879,17 @@ if "data" in st.session_state:
         for _col in ("contact_name", "chat_name", "subject"):
             if _col in df_raw.columns:
                 _all_names.update(df_raw[_col].dropna().unique())
-        _anon_map = build_anon_map(_all_names, _anon_key)
-        df_raw = apply_anon_to_df(df_raw.copy(), _anon_map)
+        _anon_map = build_anon_map(frozenset(_all_names), _anon_key)
+        # Only re-anonymize when mode changes or data was reloaded
+        _anon_cache_key = f"_anon_df_{_anon_key}"
+        if _anon_cache_key not in st.session_state or st.session_state.get(
+            "_anon_data_ver"
+        ) != id(st.session_state["data"]):
+            st.session_state[_anon_cache_key] = apply_anon_to_df(
+                df_raw.copy(), _anon_map
+            )
+            st.session_state["_anon_data_ver"] = id(st.session_state["data"])
+        df_raw = st.session_state[_anon_cache_key]
 
     # --- Sidebar Filtering ---
     st.sidebar.subheader("Filters")
