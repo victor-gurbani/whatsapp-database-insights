@@ -2069,7 +2069,9 @@ if "data" in st.session_state:
     with tab5:
         st.header("Chat Explorer & Deep Dive")
         contacts = sorted(filtered_df["contact_name"].unique().astype(str))
-        selected_contact = st.selectbox("Select Contact", contacts)
+        selected_contact = st.selectbox(
+            "Select Contact", contacts, key="chat_explorer_contact"
+        )
 
         if selected_contact:
             # Use df_base (includes 'Me') and filter by chat_name to get the full conversation
@@ -4088,6 +4090,7 @@ if "data" in st.session_state:
                             "My Name (for flipped view)",
                             value="Me",
                             help="Name to display for your messages when viewed from the other person's perspective.",
+                            key="chat_viewer_my_name",
                         )
                     else:
                         my_name = "Me"
