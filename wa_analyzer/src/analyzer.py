@@ -514,20 +514,194 @@ class WhatsappAnalyzer:
 
     def calculate_chat_reply_times(self):
         """Calculates avg reply time for Me and Them in the current dataset"""
-        df = self.data.sort_values(['timestamp']).copy()
-        df['read_at'] = pd.to_datetime(df['read_at'], errors='coerce')
-        df['time_diff'] = df['timestamp'].diff().dt.total_seconds()
-        df['prev_from_me'] = df['from_me'].shift(1)
-        
+        df = self.data.sort_values(["timestamp"]).copy()
+        df["read_at"] = pd.to_datetime(df["read_at"], errors="coerce")
+        df["time_diff"] = df["timestamp"].diff().dt.total_seconds()
+        df["prev_from_me"] = df["from_me"].shift(1)
+
         # My Reply Time: Current is from Me, Prev is from Them
-        my_replies = df[(df['from_me'] == 1) & (df['prev_from_me'] == 0)]
-        my_agg = getattr(my_replies[my_replies['time_diff'] < 86400]['time_diff'], self.stat_func)()
-        
+        my_replies = df[(df["from_me"] == 1) & (df["prev_from_me"] == 0)]
+        my_agg = getattr(
+            my_replies[my_replies["time_diff"] < 86400]["time_diff"], self.stat_func
+        )()
+
         # Their Reply Time: Current is from Them, Prev is from Me
-        their_replies = df[(df['from_me'] == 0) & (df['prev_from_me'] == 1)]
-        their_agg = getattr(their_replies[their_replies['time_diff'] < 86400]['time_diff'], self.stat_func)()
-        
-        return (my_agg / 60 if pd.notnull(my_agg) else 0), (their_agg / 60 if pd.notnull(their_agg) else 0)
+        their_replies = df[(df["from_me"] == 0) & (df["prev_from_me"] == 1)]
+        their_agg = getattr(
+            their_replies[their_replies["time_diff"] < 86400]["time_diff"],
+            self.stat_func,
+        )()
+
+        return (my_agg / 60 if pd.notnull(my_agg) else 0), (
+            their_agg / 60 if pd.notnull(their_agg) else 0
+        )
+
+    def calculate_reply_time_over_time(self, max_minutes=1440, freq="ME"):
+        """
+        Returns average reply time over time for Me and Them.
+        max_minutes: ignore reply times above this threshold (default 24h).
+        freq: resample frequency (default month-end).
+        """
+        df = self.data.sort_values(["timestamp"]).copy()
+
+        if "message_type" in df.columns:
+            df = df[df["message_type"] != 7]
+
+        df["prev_from_me"] = df["from_me"].shift(1)
+        df["time_diff"] = df["timestamp"].diff().dt.total_seconds()
+
+        max_seconds = max_minutes * 60
+
+        # My Reply Time: Current is from Me, Prev is from Them
+        my_replies = df[
+            (df["from_me"] == 1)
+            & (df["prev_from_me"] == 0)
+            & (df["time_diff"] >= 0)
+            & (df["time_diff"] < max_seconds)
+        ].copy()
+
+        if not my_replies.empty:
+            my_series = (
+                (my_replies.set_index("timestamp")["time_diff"] / 60)
+                .resample(freq)
+                .apply(self.stat_func)
+            )
+        else:
+            my_series = pd.Series(dtype="float64")
+
+        # Their Reply Time: Current is from Them, Prev is from Me
+        their_replies = df[
+            (df["from_me"] == 0)
+            & (df["prev_from_me"] == 1)
+            & (df["time_diff"] >= 0)
+            & (df["time_diff"] < max_seconds)
+        ].copy()
+
+        if not their_replies.empty:
+            their_series = (
+                (their_replies.set_index("timestamp")["time_diff"] / 60)
+                .resample(freq)
+                .apply(self.stat_func)
+            )
+        else:
+            their_series = pd.Series(dtype="float64")
+
+        if my_series.empty and their_series.empty:
+            return pd.DataFrame()
+
+        return pd.DataFrame({"Me": my_series, "Them": their_series}).dropna(how="all")
+
+    def calculate_weekly_reply_time_stability(self, max_minutes=1440):
+        """
+        Calculates median and stability (IQR) of reply times grouped by week (freq="W-MON").
+        Reply time = difference between LAST text from Person A and FIRST text from Person B.
+
+        Returns: DataFrame with columns for each metric:
+        - "Me_Median", "Me_IQR", "Me_MAD"
+        - "Them_Median", "Them_IQR", "Them_MAD"
+        Indexed by week (W-MON).
+        """
+        df = self.data.sort_values(["timestamp"]).copy()
+
+        if "message_type" in df.columns:
+            df = df[df["message_type"] != 7]
+
+        df["prev_from_me"] = df["from_me"].shift(1)
+        df["time_diff"] = df["timestamp"].diff().dt.total_seconds()
+
+        max_seconds = max_minutes * 60
+
+        # My Reply Time: Current is from Me, Prev is from Them
+        my_replies = df[
+            (df["from_me"] == 1)
+            & (df["prev_from_me"] == 0)
+            & (df["time_diff"] >= 0)
+            & (df["time_diff"] < max_seconds)
+        ].copy()
+
+        # Their Reply Time: Current is from Them, Prev is from Me
+        their_replies = df[
+            (df["from_me"] == 0)
+            & (df["prev_from_me"] == 1)
+            & (df["time_diff"] >= 0)
+            & (df["time_diff"] < max_seconds)
+        ].copy()
+
+        result_rows = []
+
+        # Helper to compute median and stability metrics
+        def compute_metrics(group_df):
+            """Returns (median, q25, q75, iqr, mad) in minutes."""
+            if group_df.empty:
+                return None, None, None, None, None
+
+            times_min = group_df["time_diff"] / 60.0
+
+            median = times_min.median()
+
+            # IQR
+            q75 = times_min.quantile(0.75)
+            q25 = times_min.quantile(0.25)
+            iqr = q75 - q25
+
+            # MAD (Median Absolute Deviation)
+            mad = (times_min - median).abs().median()
+
+            return median, q25, q75, iqr, mad
+
+        # Group by week
+        if not my_replies.empty:
+            my_replies["week"] = my_replies["timestamp"].dt.to_period("W-MON")
+            for week, group in my_replies.groupby("week"):
+                median, q25, q75, iqr, mad = compute_metrics(group)
+                if median is not None:
+                    result_rows.append(
+                        {
+                            "week": week.to_timestamp(),
+                            "Me_Median": median,
+                            "Me_Q25": q25,
+                            "Me_Q75": q75,
+                            "Me_IQR": iqr,
+                            "Me_MAD": mad,
+                        }
+                    )
+
+        if not their_replies.empty:
+            their_replies["week"] = their_replies["timestamp"].dt.to_period("W-MON")
+            for week, group in their_replies.groupby("week"):
+                median, q25, q75, iqr, mad = compute_metrics(group)
+                if median is not None:
+                    # Check if this week already exists in result_rows
+                    existing = next(
+                        (r for r in result_rows if r["week"] == week.to_timestamp()),
+                        None,
+                    )
+                    if existing:
+                        existing["Them_Median"] = median
+                        existing["Them_Q25"] = q25
+                        existing["Them_Q75"] = q75
+                        existing["Them_IQR"] = iqr
+                        existing["Them_MAD"] = mad
+                    else:
+                        result_rows.append(
+                            {
+                                "week": week.to_timestamp(),
+                                "Them_Median": median,
+                                "Them_Q25": q25,
+                                "Them_Q75": q75,
+                                "Them_IQR": iqr,
+                                "Them_MAD": mad,
+                            }
+                        )
+
+        if not result_rows:
+            return pd.DataFrame()
+
+        result_df = pd.DataFrame(result_rows)
+        result_df = result_df.set_index("week").sort_index()
+
+        # Fill NaN with None for clarity
+        return result_df.fillna(pd.NA)
 
     def calculate_chat_write_times(self):
         """
@@ -1112,14 +1286,25 @@ class WhatsappAnalyzer:
         # Seconds to Minutes
         stats["my_avg"] = stats["my_avg"] / 60
         stats["their_avg"] = stats["their_avg"] / 60
-        # Add gender
-        them_df = self.data[self.data['from_me'] == 0]
-        gender_map = them_df.drop_duplicates('chat_name').set_index('chat_name')['gender']
-        stats['gender'] = stats['chat_name'].map(gender_map)
-        
-        return stats.rename(columns={'chat_name': 'contact_name'}).dropna(subset=['my_avg', 'their_avg'], how='all')
 
-    def get_wordcloud_text(self, contact_name=None, filter_from_me=None, min_word_length=0, exclude_emails=False):
+        # Add gender
+        them_df = self.data[self.data["from_me"] == 0]
+        gender_map = them_df.drop_duplicates("chat_name").set_index("chat_name")[
+            "gender"
+        ]
+        stats["gender"] = stats["chat_name"].map(gender_map)
+
+        return stats.rename(columns={"chat_name": "contact_name"}).dropna(
+            subset=["my_avg", "their_avg"], how="all"
+        )
+
+    def get_wordcloud_text(
+        self,
+        contact_name=None,
+        filter_from_me=None,
+        min_word_length=0,
+        exclude_emails=False,
+    ):
         """
         filter_from_me: True (only My words), False (only Their words), None (All)
         """

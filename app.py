@@ -2241,6 +2241,24 @@ if "data" in st.session_state:
                     "Their Avg Write Time", "N/A", help=f"Cannot calculate: {reason}"
                 )
 
+            # Reply Time Over Time
+            st.write("### Reply Time Over Time")
+            rt_over_time = chat_analyzer.calculate_reply_time_over_time(
+                max_minutes=1440, freq="ME"
+            )
+            if not rt_over_time.empty:
+                fig_rt = px.line(
+                    rt_over_time,
+                    x=rt_over_time.index,
+                    y=rt_over_time.columns,
+                    markers=True,
+                    labels={"value": "Minutes", "index": "Month", "variable": "Sender"},
+                    title="Avg Reply Time Over Time",
+                )
+                st.plotly_chart(fig_rt, use_container_width=True)
+            else:
+                st.caption("Not enough data to calculate reply time over time.")
+
             # Write Time Over Time
             st.write("### Write Time Over Time")
             wt_over_time = chat_analyzer.calculate_write_time_over_time(
@@ -2258,6 +2276,166 @@ if "data" in st.session_state:
                 st.plotly_chart(fig_wt, use_container_width=True)
             else:
                 st.caption("No write-time data available for this chat.")
+
+            # Weekly Reply Time Stability
+            st.write("### Weekly Reply Time Stability (Median & IQR)")
+
+            smooth_data = st.checkbox(
+                "Smooth data (3-week rolling average)",
+                value=False,
+                key="smooth_reply_stability",
+            )
+
+            stability_tab1, stability_tab2 = st.tabs(
+                ["Combined View", "Split View (Me vs Them)"]
+            )
+
+            weekly_stability_raw = chat_analyzer.calculate_weekly_reply_time_stability(
+                max_minutes=1440
+            )
+
+            if not weekly_stability_raw.empty:
+                if smooth_data:
+                    # Apply 3-week rolling window, using min_periods=1 to avoid dropping edge cases
+                    weekly_stability = weekly_stability_raw.rolling(
+                        window=3, min_periods=1
+                    ).mean()
+                else:
+                    weekly_stability = weekly_stability_raw.copy()
+            else:
+                weekly_stability = weekly_stability_raw
+
+            with stability_tab1:
+                st.caption(
+                    "Combined view shows median reply time and IQR (spread) for both parties over weeks."
+                )
+                if not weekly_stability.empty:
+                    fig_stability = go.Figure()
+
+                    if "Me_Median" in weekly_stability.columns:
+                        fig_stability.add_trace(
+                            go.Scatter(
+                                x=weekly_stability.index,
+                                y=weekly_stability["Me_Median"],
+                                mode="lines+markers",
+                                name="Me (Median)",
+                                line=dict(color="#636EFA", width=2),
+                                marker=dict(size=5),
+                            )
+                        )
+                        if (
+                            "Me_Q25" in weekly_stability.columns
+                            and "Me_Q75" in weekly_stability.columns
+                        ):
+                            me_q25 = weekly_stability["Me_Q25"].fillna(0)
+                            me_q75 = weekly_stability["Me_Q75"].fillna(0)
+                            fig_stability.add_trace(
+                                go.Scatter(
+                                    x=weekly_stability.index.tolist()
+                                    + weekly_stability.index[::-1].tolist(),
+                                    y=me_q75.tolist() + me_q25.tolist()[::-1],
+                                    fill="toself",
+                                    fillcolor="rgba(99, 110, 250, 0.2)",
+                                    line=dict(color="rgba(255,255,255,0)"),
+                                    showlegend=False,
+                                    name="Me (IQR)",
+                                )
+                            )
+
+                    if "Them_Median" in weekly_stability.columns:
+                        fig_stability.add_trace(
+                            go.Scatter(
+                                x=weekly_stability.index,
+                                y=weekly_stability["Them_Median"],
+                                mode="lines+markers",
+                                name="Them (Median)",
+                                line=dict(color="#EF553B", width=2),
+                                marker=dict(size=5),
+                            )
+                        )
+                        if (
+                            "Them_Q25" in weekly_stability.columns
+                            and "Them_Q75" in weekly_stability.columns
+                        ):
+                            them_q25 = weekly_stability["Them_Q25"].fillna(0)
+                            them_q75 = weekly_stability["Them_Q75"].fillna(0)
+                            fig_stability.add_trace(
+                                go.Scatter(
+                                    x=weekly_stability.index.tolist()
+                                    + weekly_stability.index[::-1].tolist(),
+                                    y=them_q75.tolist() + them_q25.tolist()[::-1],
+                                    fill="toself",
+                                    fillcolor="rgba(239, 85, 59, 0.2)",
+                                    line=dict(color="rgba(255,255,255,0)"),
+                                    showlegend=False,
+                                    name="Them (IQR)",
+                                )
+                            )
+
+                    fig_stability.update_layout(
+                        title="Weekly Reply Time Stability (Median & IQR)",
+                        xaxis_title="Week",
+                        yaxis_title="Minutes",
+                        yaxis=dict(rangemode="tozero"),
+                        hovermode="x unified",
+                        template="plotly_white",
+                    )
+                    st.plotly_chart(fig_stability, use_container_width=True)
+                else:
+                    st.caption(
+                        "Not enough data to calculate weekly reply time stability."
+                    )
+
+            with stability_tab2:
+                st.caption(
+                    "Split view: Compare Me vs Them for both median (main line) and IQR (shaded area)."
+                )
+
+                if not weekly_stability.empty:
+                    me_cols = [
+                        c for c in weekly_stability.columns if c.startswith("Me_")
+                    ]
+                    them_cols = [
+                        c for c in weekly_stability.columns if c.startswith("Them_")
+                    ]
+
+                    if me_cols:
+                        fig_me = px.line(
+                            weekly_stability,
+                            x=weekly_stability.index,
+                            y=me_cols,
+                            markers=True,
+                            labels={
+                                "value": "Minutes",
+                                "index": "Week",
+                                "variable": "Metric",
+                            },
+                            title="My Reply Time Stability (Median, IQR, MAD)",
+                        )
+                        fig_me.update_xaxes(title_text="Week")
+                        fig_me.update_yaxes(title_text="Minutes", rangemode="tozero")
+                        st.plotly_chart(fig_me, use_container_width=True)
+
+                    if them_cols:
+                        fig_them = px.line(
+                            weekly_stability,
+                            x=weekly_stability.index,
+                            y=them_cols,
+                            markers=True,
+                            labels={
+                                "value": "Minutes",
+                                "index": "Week",
+                                "variable": "Metric",
+                            },
+                            title="Their Reply Time Stability (Median, IQR, MAD)",
+                        )
+                        fig_them.update_xaxes(title_text="Week")
+                        fig_them.update_yaxes(title_text="Minutes", rangemode="tozero")
+                        st.plotly_chart(fig_them, use_container_width=True)
+                else:
+                    st.caption(
+                        "Not enough data to calculate weekly reply time stability."
+                    )
 
             # Debug Expander (Temporary for troubleshooting)
             if their_write is None:
@@ -3953,12 +4131,24 @@ if "data" in st.session_state:
                 st.markdown("<br>", unsafe_allow_html=True)
                 col_f1, col_f2, col_f3 = st.columns(3)
                 with col_f1:
-                    enable_tooltips = st.toggle("Enable Tooltip Timestamps", value=True, help="Hover over a message to see the exact date and time.")
+                    enable_tooltips = st.toggle(
+                        "Enable Tooltip Timestamps",
+                        value=True,
+                        help="Hover over a message to see the exact date and time.",
+                    )
                 with col_f2:
-                    enable_minimap = st.toggle("Show Chat Minimap", value=True, help="Shows a VS Code style minimap of the chat history on the right.")
+                    enable_minimap = st.toggle(
+                        "Show Chat Minimap",
+                        value=True,
+                        help="Shows a VS Code style minimap of the chat history on the right.",
+                    )
                 with col_f3:
-                    enable_sentiment = st.toggle("Minimap Sentiment", value=False, help="Highlights positive (yellow) and negative (red) messages in the minimap.")
-                
+                    enable_sentiment = st.toggle(
+                        "Minimap Sentiment",
+                        value=False,
+                        help="Highlights positive (yellow) and negative (red) messages in the minimap.",
+                    )
+
                 st.markdown("<br>", unsafe_allow_html=True)
                 col_p1, col_p2 = st.columns(2)
                 with col_p1:
