@@ -2528,7 +2528,11 @@ if "data" in st.session_state:
             # Ghosting Control
             st.divider()
             gh_hours = st.slider(
-                "Ghosting Threshold (Hours)", 1, 72, 24, key=f"gh_{selected_contact}"
+                "Ghosting Threshold (Hours)",
+                1,
+                72,
+                24,
+                key="chat_explorer_ghost_thresh",
             )
 
             # Use FULL Analyzer for specific chat logic (needs Me + Them)
