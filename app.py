@@ -1031,11 +1031,19 @@ if "data" in st.session_state:
         help="Switch between Average and Median for all statistical metrics (Reply times, write times, word counts).",
         key="cfg_use_median",
     )
+
+    def _on_longer_stats_toggle():
+        if st.session_state["cfg_long_stats"]:
+            st.session_state["cfg_reply_thresh"] = 48
+        else:
+            st.session_state["cfg_reply_thresh"] = 12
+
     use_longer_stats = st.sidebar.checkbox(
         "Use Longer Time Stats",
         value=False,
-        help="Ghosting: 5 days (vs 24h), Initiation: 2 days (vs 6h)",
+        help="Ghosting: 5 days (vs 24h), Initiation: 2 days (vs 6h), Reply threshold: 48h (vs 12h)",
         key="cfg_long_stats",
+        on_change=_on_longer_stats_toggle,
     )
 
     reply_threshold_hours = st.sidebar.slider(
