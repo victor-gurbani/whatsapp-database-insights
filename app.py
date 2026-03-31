@@ -1176,6 +1176,7 @@ if "data" in st.session_state:
     st.sidebar.markdown(f"**User**: {me_display}")
 
     analyzer = WhatsappAnalyzer(filtered_df, use_medians=use_medians)
+    full_analyzer = WhatsappAnalyzer(df_base, use_medians=use_medians)
 
     # --- KPI Row ---
     # Fix: Calculate Stats from df_base (Unfiltered) to avoid "Sent: 0" when Exclude Me is on
@@ -1639,7 +1640,6 @@ if "data" in st.session_state:
 
         # USE FULL ANALYZER (Includes 'Me') for interactions
         # Because we need to know if 'I' replied or initiated.
-        full_analyzer = WhatsappAnalyzer(df_base, use_medians=use_medians)
 
         ghost_thresh = 432000 if use_longer_stats else 86400
         init_thresh = 172800 if use_longer_stats else 21600
@@ -1797,7 +1797,6 @@ if "data" in st.session_state:
 
         # We need the FULL transaction history (including ME) to calculate reply times.
         # 'analyzer' uses filtered_df which might exclude 'Me'.
-        full_analyzer = WhatsappAnalyzer(df_base, use_medians=use_medians)
 
         reply_stats = full_analyzer.get_reply_time_ranking(
             min_messages=min_msgs_input,
@@ -1990,7 +1989,7 @@ if "data" in st.session_state:
         st.header("Demographics")
         # Use full_analyzer to ensure Reply Time calc has 'Me' messages
         # analyze_by_gender() handles 'from_me=0' internally for volume.
-        gender_analyzer = WhatsappAnalyzer(df_base, use_medians=use_medians)
+        gender_analyzer = full_analyzer
 
         if exclude_family_gender and not exclude_family_global and family_list:
             # Apply family filter to base for gender analysis
@@ -3535,7 +3534,7 @@ if "data" in st.session_state:
         # Pass exclude_groups from sidebar
         # Calculate Stats using FULL Data (Context needed for Double Text, Streaks, Killers)
         # But we must respect exclude_me for the DISPLAY.
-        full_analyzer_tab6 = WhatsappAnalyzer(df_base, use_medians=use_medians)
+        full_analyzer_tab6 = full_analyzer
 
         # Pass exclude_groups from sidebar
         ex_groups = exclude_groups if "exclude_groups" in locals() else False
