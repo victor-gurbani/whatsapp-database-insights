@@ -1079,86 +1079,106 @@ if "data" in st.session_state:
     )
 
     # Apply Global Filters
-    # 1. Base Filters (Used for Chat Explorer & Identity)
-    df_base = df_raw.copy()
-
-    # Helper for identifying non-contacts (no letters in name)
     def is_number(name):
         return not bool(re.search("[a-zA-Z]", str(name)))
 
-    # SECURITY MESSAGES (ALWAYS EXCLUDE)
-    if "message_type" in df_base.columns:
-        df_base = df_base[df_base["message_type"] != 7]
+    @st.cache_data(show_spinner=False, hash_funcs={pd.DataFrame: id})
+    def _apply_global_filters(
+        _df_raw,
+        date_start,
+        date_end,
+        exclude_groups,
+        exclude_low_participation,
+        exclude_channels,
+        exclude_family_global,
+        family_tuple,
+        exclude_non_contacts,
+    ):
+        df_base = _df_raw.copy()
 
-    if len(date_range) == 2:
-        mask = (df_base["timestamp"].dt.date >= date_range[0]) & (
-            df_base["timestamp"].dt.date <= date_range[1]
-        )
-        df_base = df_base.loc[mask]
+        if "message_type" in df_base.columns:
+            df_base = df_base[df_base["message_type"] != 7]
 
-    # Dedicated group source: same global filters except "Exclude Groups"
-    # so Group Explorer remains usable even when groups are hidden elsewhere.
-    df_group_base = df_base.copy()
-    if "is_group" not in df_group_base.columns:
-        if "raw_string" in df_group_base.columns:
-            df_group_base["is_group"] = (
-                df_group_base["raw_string"].astype(str).str.endswith("@g.us")
+        if date_start is not None and date_end is not None:
+            mask = (df_base["timestamp"].dt.date >= date_start) & (
+                df_base["timestamp"].dt.date <= date_end
             )
-        else:
-            df_group_base["is_group"] = False
+            df_base = df_base.loc[mask]
 
-    if exclude_groups and "raw_string" in df_base.columns:
-        is_group = df_base["raw_string"].astype(str).str.endswith("@g.us")
-        df_base = df_base[~is_group]
-
-    if exclude_low_participation and "raw_string" in df_base.columns:
-        is_group_mask = df_base["raw_string"].astype(str).str.endswith("@g.us")
-        group_chats = df_base[is_group_mask]
-
-        groups_to_exclude = set()
-        for chat_id, group_df in group_chats.groupby("chat_name"):
-            # Check unique participants (we use sender_string for exact accuracy)
-            unique_senders = group_df["sender_string"].nunique()
-            if unique_senders > 4:
-                total_messages = len(group_df)
-                my_messages = group_df["from_me"].sum()
-                participation_ratio = (
-                    my_messages / total_messages if total_messages > 0 else 0
+        df_group_base = df_base.copy()
+        if "is_group" not in df_group_base.columns:
+            if "raw_string" in df_group_base.columns:
+                df_group_base["is_group"] = (
+                    df_group_base["raw_string"].astype(str).str.endswith("@g.us")
                 )
+            else:
+                df_group_base["is_group"] = False
 
-                if participation_ratio < 0.1:
-                    groups_to_exclude.add(chat_id)
+        if exclude_groups and "raw_string" in df_base.columns:
+            is_group = df_base["raw_string"].astype(str).str.endswith("@g.us")
+            df_base = df_base[~is_group]
 
-        if groups_to_exclude:
-            df_base = df_base[~df_base["chat_name"].isin(groups_to_exclude)]
+        if exclude_low_participation and "raw_string" in df_base.columns:
+            is_group_mask = df_base["raw_string"].astype(str).str.endswith("@g.us")
+            group_chats = df_base[is_group_mask]
 
-    if exclude_channels and "raw_string" in df_base.columns:
-        # Channels usually end in @newsletter. Status is status@broadcast. Official WA is 0@s.whatsapp.net
-        is_channel = (
-            df_base["raw_string"].astype(str).str.endswith("@newsletter")
-            | (df_base["raw_string"] == "status@broadcast")
-            | (df_base["raw_string"] == "0@s.whatsapp.net")
-        )
-        df_base = df_base[~is_channel]
-    if exclude_channels and "raw_string" in df_group_base.columns:
-        is_channel_group = (
-            df_group_base["raw_string"].astype(str).str.endswith("@newsletter")
-            | (df_group_base["raw_string"] == "status@broadcast")
-            | (df_group_base["raw_string"] == "0@s.whatsapp.net")
-        )
-        df_group_base = df_group_base[~is_channel_group]
+            groups_to_exclude = set()
+            for chat_id, group_df in group_chats.groupby("chat_name"):
+                unique_senders = group_df["sender_string"].nunique()
+                if unique_senders > 4:
+                    total_messages = len(group_df)
+                    my_messages = group_df["from_me"].sum()
+                    participation_ratio = (
+                        my_messages / total_messages if total_messages > 0 else 0
+                    )
+                    if participation_ratio < 0.1:
+                        groups_to_exclude.add(chat_id)
 
-    # System Messages (Type 7) - Already excluded above unconditionally
-    # if exclude_system and 'message_type' in filtered_df.columns:
-    #     filtered_df = filtered_df[filtered_df['message_type'] != 7]
+            if groups_to_exclude:
+                df_base = df_base[~df_base["chat_name"].isin(groups_to_exclude)]
 
-    if exclude_family_global and family_list:
-        df_base = df_base[~df_base["chat_name"].isin(family_list)]
-        df_group_base = df_group_base[~df_group_base["chat_name"].isin(family_list)]
-    if exclude_non_contacts:
-        # Remove those that appear to be just numbers
-        mask_nums = df_base["contact_name"].apply(is_number)
-        df_base = df_base[~mask_nums]
+        if exclude_channels and "raw_string" in df_base.columns:
+            is_channel = (
+                df_base["raw_string"].astype(str).str.endswith("@newsletter")
+                | (df_base["raw_string"] == "status@broadcast")
+                | (df_base["raw_string"] == "0@s.whatsapp.net")
+            )
+            df_base = df_base[~is_channel]
+        if exclude_channels and "raw_string" in df_group_base.columns:
+            is_channel_group = (
+                df_group_base["raw_string"].astype(str).str.endswith("@newsletter")
+                | (df_group_base["raw_string"] == "status@broadcast")
+                | (df_group_base["raw_string"] == "0@s.whatsapp.net")
+            )
+            df_group_base = df_group_base[~is_channel_group]
+
+        family_list_inner = list(family_tuple) if family_tuple else []
+        if exclude_family_global and family_list_inner:
+            df_base = df_base[~df_base["chat_name"].isin(family_list_inner)]
+            df_group_base = df_group_base[
+                ~df_group_base["chat_name"].isin(family_list_inner)
+            ]
+        if exclude_non_contacts:
+            mask_nums = df_base["contact_name"].apply(
+                lambda name: not bool(re.search("[a-zA-Z]", str(name)))
+            )
+            df_base = df_base[~mask_nums]
+
+        return df_base, df_group_base
+
+    date_start = date_range[0] if len(date_range) == 2 else None
+    date_end = date_range[1] if len(date_range) == 2 else None
+    df_base, df_group_base = _apply_global_filters(
+        df_raw,
+        date_start,
+        date_end,
+        exclude_groups,
+        exclude_low_participation,
+        exclude_channels,
+        exclude_family_global,
+        tuple(family_list) if family_list else (),
+        exclude_non_contacts,
+    )
 
     # 2. View Filters (Used for General Stats where Me skews it)
     filtered_df = df_base.copy()
