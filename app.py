@@ -28,6 +28,7 @@ st.title("💬 WhatsApp Interactive Analyzer")
 
 import json
 import datetime
+import re
 import numpy as np
 import string
 import random as _random
@@ -1072,8 +1073,6 @@ if "data" in st.session_state:
     df_base = df_raw.copy()
 
     # Helper for identifying non-contacts (no letters in name)
-    import re
-
     def is_number(name):
         return not bool(re.search("[a-zA-Z]", str(name)))
 
