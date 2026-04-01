@@ -957,7 +957,7 @@ if "data" in st.session_state:
 
         exclude_low_participation = st.checkbox(
             "Exclude Low-Participation Groups",
-            value=False,
+            value=True,
             key="cfg_ex_low_part",
             help="Excludes groups (>4 members) where you sent less than 10% of the messages.",
         )
