@@ -316,7 +316,7 @@ class WhatsappAnalyzer:
             return (
                 target_df.set_index("timestamp")
                 .groupby(col)
-                .resample("ME")
+                .resample("ME", include_groups=False)
                 .size()
                 .unstack(level=0)
                 .fillna(0)
@@ -402,7 +402,7 @@ class WhatsappAnalyzer:
         return (
             df_filtered.set_index("timestamp")
             .groupby("contact_name")
-            .resample("ME")
+            .resample("ME", include_groups=False)
             .size()
             .unstack(level=0)
             .fillna(0)

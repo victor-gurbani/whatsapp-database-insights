@@ -6,6 +6,17 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import matplotlib.ticker as mticker
 import matplotlib.colors as mcolors
+
+plt.rcParams["font.family"] = ["sans-serif"]
+plt.rcParams["font.sans-serif"] = [
+    "Helvetica",
+    "Arial",
+    "Apple Color Emoji",
+    "Segoe UI Emoji",
+    "Noto Color Emoji",
+    "DejaVu Sans",
+]
+
 import os
 import sqlite3
 import tempfile
@@ -2296,7 +2307,7 @@ if "data" in st.session_state:
                     labels={"value": "Minutes", "index": "Month", "variable": "Sender"},
                     title="Avg Reply Time Over Time",
                 )
-                st.plotly_chart(fig_rt, use_container_width=True)
+                st.plotly_chart(fig_rt, width="stretch")
             else:
                 st.caption("Not enough data to calculate reply time over time.")
 
@@ -2314,7 +2325,7 @@ if "data" in st.session_state:
                     labels={"value": "Minutes", "index": "Month", "variable": "Sender"},
                     title="Avg Write Time Over Time",
                 )
-                st.plotly_chart(fig_wt, use_container_width=True)
+                st.plotly_chart(fig_wt, width="stretch")
             else:
                 st.caption("No write-time data available for this chat.")
 
@@ -2421,7 +2432,7 @@ if "data" in st.session_state:
                         hovermode="x unified",
                         template="plotly_white",
                     )
-                    st.plotly_chart(fig_stability, use_container_width=True)
+                    st.plotly_chart(fig_stability, width="stretch")
                 else:
                     st.caption(
                         "Not enough data to calculate weekly reply time stability."
@@ -2455,7 +2466,7 @@ if "data" in st.session_state:
                         )
                         fig_me.update_xaxes(title_text="Week")
                         fig_me.update_yaxes(title_text="Minutes", rangemode="tozero")
-                        st.plotly_chart(fig_me, use_container_width=True)
+                        st.plotly_chart(fig_me, width="stretch")
 
                     if them_cols:
                         fig_them = px.line(
@@ -2472,7 +2483,7 @@ if "data" in st.session_state:
                         )
                         fig_them.update_xaxes(title_text="Week")
                         fig_them.update_yaxes(title_text="Minutes", rangemode="tozero")
-                        st.plotly_chart(fig_them, use_container_width=True)
+                        st.plotly_chart(fig_them, width="stretch")
                 else:
                     st.caption(
                         "Not enough data to calculate weekly reply time stability."
@@ -2534,7 +2545,7 @@ if "data" in st.session_state:
                         labels={"x": "Time", "y": "Count"},
                         title=f"{selected_contact}'s Speed",
                     )
-                    st.plotly_chart(fig_dist, use_container_width=True)
+                    st.plotly_chart(fig_dist, width="stretch")
                 else:
                     st.caption("No data")
 
@@ -2549,7 +2560,7 @@ if "data" in st.session_state:
                         title="My Speed",
                     )
                     fig_dist_me.update_traces(marker_color="#EF553B")
-                    st.plotly_chart(fig_dist_me, use_container_width=True)
+                    st.plotly_chart(fig_dist_me, width="stretch")
 
             # Ghosting Control
             st.divider()
@@ -3173,7 +3184,7 @@ if "data" in st.session_state:
                         st.caption(
                             "Includes message/word share, reply speed, and read-time metrics."
                         )
-                        st.dataframe(rankings, use_container_width=True)
+                        st.dataframe(rankings, width="stretch")
 
                         # ---- Activity Comparison Over Time ----
                         st.subheader("📈 Member Activity Over Time")
@@ -3421,7 +3432,7 @@ if "data" in st.session_state:
                                     )
                                     st.dataframe(
                                         summary.sort_values("Avg Reply (min)"),
-                                        use_container_width=True,
+                                        width="stretch",
                                     )
                                 else:
                                     st.caption(
@@ -3545,7 +3556,7 @@ if "data" in st.session_state:
                             gdf[msg_cols]
                             .sort_values("timestamp", ascending=False)
                             .head(30),
-                            use_container_width=True,
+                            width="stretch",
                         )
 
     with tab6:
@@ -3898,7 +3909,7 @@ if "data" in st.session_state:
                     .reset_index(name="Top Emojis")
                 )
                 st.dataframe(
-                    top_emo_disp.set_index("contact_name"), use_container_width=True
+                    top_emo_disp.set_index("contact_name"), width="stretch"
                 )
             else:
                 st.write("No contacts selected.")
