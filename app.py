@@ -21,6 +21,8 @@ import os
 import sqlite3
 import tempfile
 import hashlib
+import threading
+from streamlit.runtime.scriptrunner import add_script_run_ctx
 from wa_analyzer.src.parser import WhatsappParser
 from wa_analyzer.src.analyzer import WhatsappAnalyzer
 from wa_analyzer.src.chat_viewer import (
@@ -1558,78 +1560,106 @@ if "data" in st.session_state:
         )
 
         if st.button("Generate Bar Chart Race Video", key="race_video_generate"):
-            with st.spinner(
-                "Rendering race video... this may take a while on large date ranges."
-            ):
-                fps_value = 60 if race_60fps else 15
-                bucket_freq = "6h" if race_60fps else "D"
-                count_mode = "chat_total" if include_chat_sum else "their_only"
-                rolling_counts = build_rolling_counts(
-                    df_base,
-                    count_mode=count_mode,
-                    average_my_messages=(average_my_msgs and include_chat_sum),
-                    top_candidates=candidate_pool,
-                    time_bin=bucket_freq,
-                    window_offset=window_offset,
-                )
+            st.session_state["race_video_generating"] = True
+            st.session_state.pop("race_video_payload", None)
+            st.session_state.pop("race_video_error", None)
 
-                if rolling_counts.empty:
-                    st.warning(
-                        "No usable activity found for the race video with current filters."
-                    )
-                    st.session_state.pop("race_video_payload", None)
-                else:
-                    dims = {
-                        "Preview (960x540)": (960, 540),
-                        "HD (1280x720)": (1280, 720),
-                        "Full HD (1920x1080)": (1920, 1080),
-                    }
-                    width, height = dims[quality]
-                    payload = render_contact_race_video(
-                        rolling_counts=rolling_counts,
-                        top_k=10,
-                        fps=fps_value,
-                        seconds_per_month=seconds_per_month,
-                        width=width,
-                        height=height,
+            def _generate_video():
+                try:
+                    fps_value = 60 if race_60fps else 15
+                    bucket_freq = "6h" if race_60fps else "D"
+                    count_mode = "chat_total" if include_chat_sum else "their_only"
+                    rolling_counts = build_rolling_counts(
+                        df_base,
+                        count_mode=count_mode,
+                        average_my_messages=(average_my_msgs and include_chat_sum),
+                        top_candidates=candidate_pool,
+                        time_bin=bucket_freq,
                         window_offset=window_offset,
-                        window_label=window_label,
                     )
-                    months_span = max(
-                        (
-                            rolling_counts.index.max() - rolling_counts.index.min()
-                        ).total_seconds()
-                        / (86400 * 30.4375),
-                        0,
+
+                    if rolling_counts.empty:
+                        st.session_state["race_video_error"] = (
+                            "No usable activity found for the race video with current filters."
+                        )
+                    else:
+                        dims = {
+                            "Preview (960x540)": (960, 540),
+                            "HD (1280x720)": (1280, 720),
+                            "Full HD (1920x1080)": (1920, 1080),
+                        }
+                        width, height = dims[quality]
+                        payload = render_contact_race_video(
+                            rolling_counts=rolling_counts,
+                            top_k=10,
+                            fps=fps_value,
+                            seconds_per_month=seconds_per_month,
+                            width=width,
+                            height=height,
+                            window_offset=window_offset,
+                            window_label=window_label,
+                        )
+                        months_span = max(
+                            (
+                                rolling_counts.index.max() - rolling_counts.index.min()
+                            ).total_seconds()
+                            / (86400 * 30.4375),
+                            0,
+                        )
+                        date_fmt = (
+                            "%Y-%m-%d %H:%M" if bucket_freq != "D" else "%Y-%m-%d"
+                        )
+                        payload["date_start"] = rolling_counts.index.min().strftime(
+                            date_fmt
+                        )
+                        payload["date_end"] = rolling_counts.index.max().strftime(
+                            date_fmt
+                        )
+                        payload["contacts_count"] = int(rolling_counts.shape[1])
+                        payload["seconds_per_month"] = float(seconds_per_month)
+                        payload["approx_seconds"] = (
+                            max(months_span * float(seconds_per_month), 8.0) + 0.8
+                        )
+                        payload["quality"] = quality
+                        payload["fps"] = fps_value
+                        payload["bucket_freq"] = bucket_freq
+                        payload["precision_label"] = (
+                            "6h sampling + time interpolation"
+                            if race_60fps
+                            else "Standard daily steps"
+                        )
+                        payload["count_mode_label"] = (
+                            "Their messages only"
+                            if count_mode == "their_only"
+                            else "Chat total (theirs + mine)"
+                        )
+                        payload["avg_my_msgs"] = bool(
+                            average_my_msgs and include_chat_sum
+                        )
+                        st.session_state["race_video_payload"] = payload
+                except Exception as e:
+                    st.session_state["race_video_error"] = (
+                        f"Error generating video: {e}"
                     )
-                    date_fmt = "%Y-%m-%d %H:%M" if bucket_freq != "D" else "%Y-%m-%d"
-                    payload["date_start"] = rolling_counts.index.min().strftime(
-                        date_fmt
-                    )
-                    payload["date_end"] = rolling_counts.index.max().strftime(date_fmt)
-                    payload["contacts_count"] = int(rolling_counts.shape[1])
-                    payload["seconds_per_month"] = float(seconds_per_month)
-                    payload["approx_seconds"] = (
-                        max(months_span * float(seconds_per_month), 8.0) + 0.8
-                    )
-                    payload["quality"] = quality
-                    payload["fps"] = fps_value
-                    payload["bucket_freq"] = bucket_freq
-                    payload["precision_label"] = (
-                        "6h sampling + time interpolation"
-                        if race_60fps
-                        else "Standard daily steps"
-                    )
-                    payload["count_mode_label"] = (
-                        "Their messages only"
-                        if count_mode == "their_only"
-                        else "Chat total (theirs + mine)"
-                    )
-                    payload["avg_my_msgs"] = bool(average_my_msgs and include_chat_sum)
-                    st.session_state["race_video_payload"] = payload
+                finally:
+                    st.session_state["race_video_generating"] = False
+
+            thread = threading.Thread(target=_generate_video)
+            add_script_run_ctx(thread)
+            thread.start()
+
+        if st.session_state.get("race_video_generating"):
+            st.info(
+                "⏳ Rendering race video in the background... You can continue using the rest of the app."
+            )
+            st.button("Refresh Status")
+
+        race_video_error = st.session_state.get("race_video_error")
+        if race_video_error:
+            st.error(race_video_error)
 
         race_payload = st.session_state.get("race_video_payload")
-        if race_payload:
+        if race_payload and not st.session_state.get("race_video_generating"):
             if race_payload.get("mime") == "video/mp4":
                 st.video(race_payload["bytes"])
             else:
@@ -3908,9 +3938,7 @@ if "data" in st.session_state:
                     .apply(lambda x: " ".join(x))
                     .reset_index(name="Top Emojis")
                 )
-                st.dataframe(
-                    top_emo_disp.set_index("contact_name"), width="stretch"
-                )
+                st.dataframe(top_emo_disp.set_index("contact_name"), width="stretch")
             else:
                 st.write("No contacts selected.")
 
