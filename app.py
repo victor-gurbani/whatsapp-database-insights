@@ -952,7 +952,7 @@ if "data" in st.session_state:
                 help="Replace absolute numbers (message counts, reply times, etc.) with randomised values of similar magnitude.",
             )
 
-    with st.sidebar.expander("🔍 Filters", expanded=False):
+    with st.sidebar.expander("🔍 Filters", expanded=True):
         exclude_groups = st.checkbox("Exclude Groups", value=False, key="cfg_ex_groups")
 
         exclude_low_participation = st.checkbox(
@@ -982,7 +982,7 @@ if "data" in st.session_state:
             key="cfg_ex_system",
         )
 
-    with st.sidebar.expander("👥 Contact Management", expanded=False):
+    with st.sidebar.expander("👥 Contact Management", expanded=True):
         all_contacts = sorted(df_raw["contact_name"].unique().astype(str))
 
         default_fam = []
