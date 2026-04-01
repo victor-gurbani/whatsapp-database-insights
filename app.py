@@ -1653,9 +1653,6 @@ if "data" in st.session_state:
     def _frag_behavioral():
         st.header("Behavioral Analysis")
 
-        # USE FULL ANALYZER (Includes 'Me') for interactions
-        # Because we need to know if 'I' replied or initiated.
-
         ghost_thresh = 432000 if use_longer_stats else 86400
         init_thresh = 172800 if use_longer_stats else 21600
 
@@ -1672,9 +1669,10 @@ if "data" in st.session_state:
 
             bhv_exclude = family_list if exclude_family_behavior else None
 
-            ghosts = full_analyzer.get_ghosting_stats(
-                ghost_thresh, exclude_list=bhv_exclude
-            )
+            with st.spinner("Computing ghosting stats..."):
+                ghosts = full_analyzer.get_ghosting_stats(
+                    ghost_thresh, exclude_list=bhv_exclude
+                )
             if not ghosts.empty:
                 fig_ghost = px.bar(
                     ghosts,
@@ -1698,9 +1696,10 @@ if "data" in st.session_state:
 
             st.divider()
             st.subheader("😶 People I Ignore (Me → Them)")
-            ignored = full_analyzer.get_left_on_read_stats(
-                ghost_thresh, exclude_list=bhv_exclude
-            )
+            with st.spinner("Computing ignore stats..."):
+                ignored = full_analyzer.get_left_on_read_stats(
+                    ghost_thresh, exclude_list=bhv_exclude
+                )
             if not ignored.empty:
                 # ignored is a pivot table with columns like 'True Ghost', 'Left on Delivered', 'Total Ignored'
                 # We can plot 'Total Ignored' or stack the types. Stacked is better.
@@ -1742,9 +1741,10 @@ if "data" in st.session_state:
         with col_i:
             st.subheader("👋 Conversation Initiators")
             st.caption(f"Threshold: {init_thresh / 3600:.1f} hours silence.")
-            initiations = full_analyzer.get_initiation_stats(
-                init_thresh, exclude_list=bhv_exclude
-            )
+            with st.spinner("Computing initiation stats..."):
+                initiations = full_analyzer.get_initiation_stats(
+                    init_thresh, exclude_list=bhv_exclude
+                )
             if not initiations.empty:
                 # Overall summary stats
                 total_me = initiations["Me"].sum()
@@ -2016,8 +2016,9 @@ if "data" in st.session_state:
             gender_df_source = df_base[~df_base["chat_name"].isin(family_list)]
             gender_analyzer = WhatsappAnalyzer(gender_df_source)
 
-        gender_counts = gender_analyzer.analyze_by_gender()
-        gender_stats = gender_analyzer.calculate_gender_stats()
+        with st.spinner("Analyzing demographics..."):
+            gender_counts = gender_analyzer.analyze_by_gender()
+            gender_stats = gender_analyzer.calculate_gender_stats()
 
         c1, c2 = st.columns([1, 2])
         with c1:
@@ -2100,11 +2101,8 @@ if "data" in st.session_state:
         )
 
         if selected_contact:
-            # Use df_base (includes 'Me') and filter by chat_name to get the full conversation
             sub_df = df_base[df_base["chat_name"] == selected_contact].copy()
             st.write(f"### Analysis: **{selected_contact}**")
-
-            # Breakdown Stats
             total_msgs = len(sub_df)
             me_rows = sub_df[sub_df["from_me"] == 1]
             them_rows = sub_df[sub_df["from_me"] == 0]
@@ -2758,14 +2756,15 @@ if "data" in st.session_state:
         if "is_group" not in df_group_base.columns:
             st.info("Group metadata is unavailable in this dataset.")
         else:
-            groups_df = df_group_base[df_group_base["is_group"] == True].copy()
-            groups_df = groups_df[groups_df["chat_name"].notnull()]
-            lid_to_pn_map = load_lid_jid_map(msgstore_path)
-            jid_raw_lookup = load_jid_raw_lookup(msgstore_path)
-            vcf_contact_lookup = load_vcf_contact_lookup(vcf_path)
-            lids_by_pn = {}
-            for lid_id, pn_id in lid_to_pn_map.items():
-                lids_by_pn.setdefault(pn_id, []).append(lid_id)
+            with st.spinner("Loading group data..."):
+                groups_df = df_group_base[df_group_base["is_group"] == True].copy()
+                groups_df = groups_df[groups_df["chat_name"].notnull()]
+                lid_to_pn_map = load_lid_jid_map(msgstore_path)
+                jid_raw_lookup = load_jid_raw_lookup(msgstore_path)
+                vcf_contact_lookup = load_vcf_contact_lookup(vcf_path)
+                lids_by_pn = {}
+                for lid_id, pn_id in lid_to_pn_map.items():
+                    lids_by_pn.setdefault(pn_id, []).append(lid_id)
 
             if groups_df.empty:
                 st.info("No groups found with current filters.")
@@ -3571,17 +3570,19 @@ if "data" in st.session_state:
         # But we must respect exclude_me for the DISPLAY.
         full_analyzer_tab6 = full_analyzer
 
-        # Pass exclude_groups from sidebar
         ex_groups = exclude_groups if "exclude_groups" in locals() else False
 
-        # Force exclude_groups=True for Behavioral/Fun stats as requested (Double Text, Dry Texter)
-        # These metrics usually only make sense for 1-on-1 chats.
-        beh_scorecard = full_analyzer_tab6.get_behavioral_scorecard(exclude_groups=True)
-        fun_stats = full_analyzer_tab6.get_fun_stats(
-            top_n=top_n_val, exclude_groups=True
-        )
-        streaks = full_analyzer_tab6.get_streak_stats(exclude_groups=ex_groups)
-        killers = full_analyzer_tab6.get_conversation_killers(exclude_groups=ex_groups)
+        with st.spinner("Crunching fun stats..."):
+            beh_scorecard = full_analyzer_tab6.get_behavioral_scorecard(
+                exclude_groups=True
+            )
+            fun_stats = full_analyzer_tab6.get_fun_stats(
+                top_n=top_n_val, exclude_groups=True
+            )
+            streaks = full_analyzer_tab6.get_streak_stats(exclude_groups=ex_groups)
+            killers = full_analyzer_tab6.get_conversation_killers(
+                exclude_groups=ex_groups
+            )
 
         # New Stats
         # Pass exclude_me (global) to filter "Me" from top reactors
@@ -4097,7 +4098,8 @@ if "data" in st.session_state:
     @st.fragment
     def _frag_map():
         st.header("🗺️ Location Map")
-        loc_data = analyzer.get_location_data()
+        with st.spinner("Loading location data..."):
+            loc_data = analyzer.get_location_data()
         if not loc_data.empty:
             st.map(loc_data, latitude="latitude", longitude="longitude")
             st.dataframe(loc_data[["contact_name", "timestamp", "place_name"]])
@@ -4321,24 +4323,25 @@ if "data" in st.session_state:
                 st.divider()
                 st.subheader("💬 Chat Preview")
 
-                html_output = generate_chat_html(
-                    chat_df=chat_df,
-                    flip_sides=flip_sides,
-                    adv_replies=adv_replies,
-                    msgs_above=adv_msgs_above,
-                    msgs_below=adv_msgs_below,
-                    context_view=context_view,
-                    unreplied_chunk_size=unreplied_chunk_size,
-                    unreplied_other_only=unreplied_other_only,
-                    collapse_replies=collapse_replies,
-                    virtualization=enable_virtualization,
-                    virt_initial=virt_initial,
-                    virt_chunk=virt_chunk,
-                    my_name=my_name,
-                    enable_tooltips=enable_tooltips,
-                    enable_minimap=enable_minimap,
-                    enable_sentiment=enable_sentiment,
-                )
+                with st.spinner("Rendering chat..."):
+                    html_output = generate_chat_html(
+                        chat_df=chat_df,
+                        flip_sides=flip_sides,
+                        adv_replies=adv_replies,
+                        msgs_above=adv_msgs_above,
+                        msgs_below=adv_msgs_below,
+                        context_view=context_view,
+                        unreplied_chunk_size=unreplied_chunk_size,
+                        unreplied_other_only=unreplied_other_only,
+                        collapse_replies=collapse_replies,
+                        virtualization=enable_virtualization,
+                        virt_initial=virt_initial,
+                        virt_chunk=virt_chunk,
+                        my_name=my_name,
+                        enable_tooltips=enable_tooltips,
+                        enable_minimap=enable_minimap,
+                        enable_sentiment=enable_sentiment,
+                    )
 
                 st.components.v1.html(html_output, height=620, scrolling=False)
         else:
