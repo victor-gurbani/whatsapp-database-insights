@@ -542,9 +542,11 @@ class WhatsappParser:
             # Logic: If from_me=1, sender is 'You'.
             # Resolve names (Full Contact Lookup)
             reactions["sender_display"] = reactions.apply(
-                lambda x: "You"
-                if x.get("from_me") == 1
-                else get_name_from_id(x.get("raw_string"), x.get("user"), None),
+                lambda x: (
+                    "You"
+                    if x.get("from_me") == 1
+                    else get_name_from_id(x.get("raw_string"), x.get("user"), None)
+                ),
                 axis=1,
             )
 
@@ -555,7 +557,10 @@ class WhatsappParser:
 
             reactions_agg = (
                 reactions.groupby("message_row_id")
-                .apply(lambda x: list(zip(x["reaction"], x["sender_display"])))
+                .apply(
+                    lambda x: list(zip(x["reaction"], x["sender_display"])),
+                    include_groups=False,
+                )
                 .reset_index(name="reactions_list")
             )
 
@@ -595,7 +600,8 @@ class WhatsappParser:
             mentions_pairs = (
                 mentions.groupby("message_row_id")
                 .apply(
-                    lambda x: list(zip(x["mentioned_jid_row_id"], x["mentioned_name"]))
+                    lambda x: list(zip(x["mentioned_jid_row_id"], x["mentioned_name"])),
+                    include_groups=False,
                 )
                 .reset_index(name="mentions_pairs")
             )
@@ -619,7 +625,7 @@ class WhatsappParser:
                 on="message_row_id",
                 how="left",
             )
-            merged["is_quote"] = merged["is_quote"].fillna(False)
+            merged["is_quote"] = merged["is_quote"].fillna(False).astype(bool)
         else:
             merged["is_quote"] = False
 

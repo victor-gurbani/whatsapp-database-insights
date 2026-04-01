@@ -39,6 +39,17 @@ st.set_page_config(page_title="WhatsApp Analytics", layout="wide", page_icon="�
 # Title
 st.title("💬 WhatsApp Interactive Analyzer")
 
+if st.session_state.get("race_video_ready_notification") and not st.session_state.get(
+    "race_video_generating"
+):
+    with st.container():
+        st.success(
+            "🎬 **Your Bar Chart Race Video is ready!** Go to the 'Activity & Top Users' tab to view and download it."
+        )
+        if st.button("Dismiss Notification"):
+            st.session_state["race_video_ready_notification"] = False
+            st.rerun()
+
 import json
 import datetime
 import re
@@ -695,7 +706,12 @@ def load_group_receipt_events(msgstore_path, group_jid):
         conn = sqlite3.connect(msgstore_path)
         raw_user = pd.read_sql_query(query_receipt_user, conn, params=[group_jid])
         raw_legacy = pd.read_sql_query(query_receipts, conn, params=[group_jid])
-        raw = pd.concat([raw_user, raw_legacy], ignore_index=True)
+        to_concat = [df for df in [raw_user, raw_legacy] if not df.empty]
+        raw = (
+            pd.concat(to_concat, ignore_index=True)
+            if to_concat
+            else pd.DataFrame(columns=cols)
+        )
     except Exception:
         return pd.DataFrame(columns=cols)
     finally:
@@ -1643,6 +1659,7 @@ if "data" in st.session_state:
                     )
                 finally:
                     st.session_state["race_video_generating"] = False
+                    st.session_state["race_video_ready_notification"] = True
 
             thread = threading.Thread(target=_generate_video)
             add_script_run_ctx(thread)
@@ -1660,6 +1677,9 @@ if "data" in st.session_state:
 
         race_payload = st.session_state.get("race_video_payload")
         if race_payload and not st.session_state.get("race_video_generating"):
+            if st.session_state.get("race_video_ready_notification"):
+                st.session_state["race_video_ready_notification"] = False
+
             if race_payload.get("mime") == "video/mp4":
                 st.video(race_payload["bytes"])
             else:
@@ -3249,7 +3269,7 @@ if "data" in st.session_state:
                         timeline = (
                             timeline_df.set_index("timestamp")
                             .groupby("sender_label")
-                            .resample("ME")
+                            .resample("ME", include_groups=False)
                             .size()
                             .unstack(level=0)
                             .fillna(0)
