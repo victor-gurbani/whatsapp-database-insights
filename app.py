@@ -1666,10 +1666,17 @@ if "data" in st.session_state:
             thread.start()
 
         if st.session_state.get("race_video_generating"):
-            st.info(
-                "⏳ Rendering race video in the background... You can continue using the rest of the app."
-            )
-            st.button("Refresh Status")
+
+            @st.fragment(run_every="2s")
+            def _poll_video_status():
+                if st.session_state.get("race_video_generating"):
+                    st.info(
+                        "⏳ Rendering race video in the background... You can continue using the rest of the app."
+                    )
+                elif st.session_state.get("race_video_ready_notification"):
+                    st.rerun()
+
+            _poll_video_status()
 
         race_video_error = st.session_state.get("race_video_error")
         if race_video_error:
@@ -1677,9 +1684,7 @@ if "data" in st.session_state:
 
         race_payload = st.session_state.get("race_video_payload")
         if race_payload and not st.session_state.get("race_video_generating"):
-            if st.session_state.get("race_video_ready_notification"):
-                st.session_state["race_video_ready_notification"] = False
-
+            # Intentionally leaving the notification active until the user dismisses it manually at the top.
             if race_payload.get("mime") == "video/mp4":
                 st.video(race_payload["bytes"])
             else:
